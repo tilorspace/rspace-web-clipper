@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>RSpace Web Clipper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Auth screen -->
+    <div id="auth-screen" class="screen">
+      <div class="auth-content">
+        <h1>Connect to RSpace</h1>
+        <p class="subtitle">Enter the RSpace server URL and your API key.</p>
+        
+        <div class="form-group">
+          <label for="server-url">RSpace Server URL</label>
+          <input type="text" id="server-url" placeholder="your-rspace-server.com" value="https://" />
+        </div>
+        
+        <div class="form-group">
+          <label for="api-key">API Key</label>
+          <input type="password" id="api-key" placeholder="Your RSpace API key" />
+          <p class="helper-text">Find your API key in RSpace: MyRSpace → My Profile</p>
+        </div>
+        
+        <div class="remember-options">
+          <label class="checkbox-label">
+            <input type="checkbox" id="remember-server" checked />
+            <span>Remember server URL</span>
+          </label>
+          
+          <label class="checkbox-label">
+            <input type="checkbox" id="remember-api-key" />
+            <span>Remember API key for 7 days</span>
+          </label>
+          <p class="warning-text">⚠️ Only enable on trusted, private devices</p>
+        </div>
+        
+        <button id="connect-btn" class="btn-primary">Connect to RSpace</button>
+        
+        <div class="auth-links">
+          <button id="back-btn" class="btn-link" style="display:none;">← Back to Clipper</button>
+          <button id="clear-data-btn" class="btn-link">🗑️ Clear Saved Data</button>
+        </div>
+        
+        <div id="auth-error" class="error"></div>
+      </div>
+    </div>
+
+    <!-- Clipper screen -->
+    <div id="clipper-screen" class="screen" style="display:none;">
+      <!-- Section 1: Fixed header - Radio buttons -->
+      <div class="content-header">
+        <div class="form-group">
+          <label>What to save</label>
+          <div class="radio-group">
+            <div class="radio-option">
+              <input type="radio" name="content-type" value="selection" id="type-selection" checked>
+              <label for="type-selection">Selection</label>
+            </div>
+            <div class="radio-option">
+              <input type="radio" name="content-type" value="url-only" id="type-url">
+              <label for="type-url">URL Only</label>
+            </div>
+            <div class="radio-option">
+              <input type="radio" name="content-type" value="full-page" id="type-page">
+              <label for="type-page">Full Page</label>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="search-header">
+        <div class="form-group">
+          <label for="document-search">Save to</label>
+          <div class="search-wrapper">
+            <input type="text" id="document-search" placeholder="Find or create a document" />
+            <button class="search-clear" id="search-clear" aria-label="Clear search">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </button>
+          </div>
+          
+          <div id="create-hint" class="create-hint" style="display:none;">
+            Press Enter or click Save to create new document
+          </div>
+        </div>
+      </div>
+      
+      <!-- Section 3: Scrollable middle - Document list with infinite scroll -->
+      <div class="document-section">
+        <!-- Enhanced empty state for first-time users -->
+        <div id="empty-state" class="empty-state" style="display:none;">
+          <span class="empty-state-icon">📝</span>
+          <h3>No Documents Yet</h3>
+          <p>Start by creating your first document.<br>Enter a name in the search box above.</p>
+        </div>
+        
+        <div id="document-list" class="document-list"></div>
+        
+        <!-- Enhanced loading indicator for infinite scroll -->
+        <div id="loading-indicator" class="loading-indicator" style="display:none;">
+          <div class="loading-spinner"></div>
+          <span>Loading documents...</span>
+        </div>
+      </div>
+      
+      <!-- Section 4: Sticky footer - Note, Save button, Settings -->
+      <div class="sticky-footer">
+        <div class="note-group">
+          <textarea id="note" rows="1" placeholder="Add note (optional)"></textarea>
+        </div>
+        
+        <div class="button-container">
+          <button id="clip-btn" class="btn-primary">Save to RSpace</button>
+          <button id="settings-btn" class="settings-link">⚙️ Settings</button>
+          <div id="clip-error" class="error"></div>
+          <div id="clip-success" class="success"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading screen -->
+    <div id="loading-screen" class="screen" style="display:none;">
+      <div class="loading-content">
+        <div class="spinner"></div>
+        <p>Saving content to RSpace...</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

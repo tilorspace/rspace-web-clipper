@@ -1,0 +1,494 @@
+// Background service worker for RSpace Web Clipper
+// Handles authentication, API calls, and content saving
+
+// Load configuration
+importScripts('config.js');
+
+// Security: Disable all logging in production
+const DEBUG = false;
+const log = DEBUG ? console.log : () => {};
+const logError = DEBUG ? console.error : () => {};
+
+// Document cache with TTL
+let documentsCache = {
+  data: null,
+  timestamp: null,
+  ttl: 5 * 60 * 1000, // 5 minutes
+  totalPages: null,
+  pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
+};
+
+// Request deduplication map
+const activeRequests = new Map();
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  log('Background received message:', request.action);
+  
+  if (request.action === 'startAuth') {
+    handleAuth(request.serverUrl, request.apiKey).then(sendResponse);
+    return true;
+  }
+  
+  if (request.action === 'getDocuments') {
+    getDocuments(request.pageNumber || 0).then(sendResponse);
+    return true;
+  }
+  
+  if (request.action === 'clipContent') {
+    clipContent(request).then(sendResponse);
+    return true;
+  }
+});
+
+async function handleAuth(serverUrl, apiKey) {
+  log('handleAuth called with URL:', serverUrl);
+  try {
+    log('Testing API key...');
+    // Test the API key with timeout
+    const response = await fetchWithTimeout(`${serverUrl}/api/v1/status`, {
+      headers: {
+        'apiKey': apiKey
+      }
+    });
+    
+    log('API response status:', response.status);
+    
+    if (!response.ok) {
+      // Improved HTTP status code handling
+      if (response.status === 401) {
+        return { success: false, error: 'Invalid API key' };
+      } else if (response.status === 403) {
+        return { success: false, error: 'Access denied. Please check your permissions.' };
+      } else if (response.status === 404) {
+        return { success: false, error: 'Server endpoint not found. Please check the URL.' };
+      } else if (response.status === 429) {
+        return { success: false, error: 'Too many requests. Please wait a moment and try again.' };
+      } else if (response.status >= 500) {
+        return { success: false, error: 'Server error. Please try again later.' };
+      }
+      return { success: false, error: 'Invalid API key or server URL' };
+    }
+    
+    log('API key valid, storing credentials...');
+    // Security: Store credentials in session storage (more secure than local)
+    // Session storage is cleared when browser closes
+    await chrome.storage.session.set({ 
+      serverUrl, 
+      accessToken: apiKey 
+    });
+    
+    // Clear cache on new auth
+    documentsCache = {
+      data: null,
+      timestamp: null,
+      ttl: 5 * 60 * 1000,
+      totalPages: null,
+      pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
+    };
+    
+    log('Credentials stored successfully');
+    return { success: true };
+  } catch (error) {
+    logError('Auth error:', error);
+    
+    // Improved error messaging
+    if (error.message === 'Request timeout') {
+      return { success: false, error: 'Connection timeout. Please check your network and try again.' };
+    }
+    return { success: false, error: 'Authentication failed. Please check your connection.' };
+  }
+}
+
+async function getDocuments(pageNumber = 0) {
+  log('getDocuments called for page:', pageNumber);
+  
+  const cacheKey = `documents_${pageNumber}`;
+  
+  // Request deduplication
+  if (activeRequests.has(cacheKey)) {
+    log('Returning existing request for:', cacheKey);
+    return activeRequests.get(cacheKey);
+  }
+  
+  const requestPromise = (async () => {
+    try {
+      const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
+      log('Got credentials from storage:', { serverUrl: serverUrl, hasToken: !!accessToken });
+      
+      if (!serverUrl || !accessToken) {
+        return { success: false, error: 'Not authenticated', documents: [], hasMore: false };
+      }
+      
+      // Check cache only for first page
+      if (pageNumber === 0) {
+        const now = Date.now();
+        if (documentsCache.data && 
+            documentsCache.timestamp && 
+            (now - documentsCache.timestamp) < documentsCache.ttl) {
+          log('Returning cached documents');
+          return { 
+            success: true, 
+            documents: documentsCache.data,
+            hasMore: documentsCache.totalPages > 1
+          };
+        }
+      }
+      
+      const pageSize = CONFIG.API.DEFAULT_PAGE_SIZE;
+      const fetchUrl = `${serverUrl}/api/v1/documents?pageSize=${pageSize}&pageNumber=${pageNumber}&orderBy=lastModified desc`;
+      log('Fetching documents from:', fetchUrl);
+      
+      const response = await fetchWithTimeout(fetchUrl, {
+        headers: {
+          'apiKey': accessToken
+        }
+      });
+      
+      log('Documents fetch response status:', response.status);
+      
+      if (!response.ok) {
+        logError('Documents fetch failed:', response.status, response.statusText);
+        
+        // Improved HTTP status code handling
+        if (response.status === 401) {
+          return { success: false, error: 'Session expired', documents: [], hasMore: false };
+        } else if (response.status === 403) {
+          return { success: false, error: 'Access denied', documents: [], hasMore: false };
+        } else if (response.status === 429) {
+          return { success: false, error: 'Too many requests', documents: [], hasMore: false };
+        } else if (response.status >= 500) {
+          return { success: false, error: 'Server error', documents: [], hasMore: false };
+        }
+        
+        return { success: false, error: 'Failed to fetch documents', documents: [], hasMore: false };
+      }
+      
+      const data = await response.json();
+      log('Documents fetched:', data.documents?.length || 0);
+      
+      const documents = data.documents.map(doc => ({
+        id: doc.id,
+        globalId: doc.globalId,
+        name: doc.name
+      }));
+      
+      const totalDocs = data.totalHits || documents.length;
+      const totalPages = Math.ceil(totalDocs / pageSize);
+      const hasMore = (pageNumber + 1) < totalPages;
+      
+      // Cache only first page
+      if (pageNumber === 0) {
+        documentsCache = {
+          data: documents,
+          timestamp: Date.now(),
+          ttl: 5 * 60 * 1000,
+          totalPages: totalPages,
+          pageSize: pageSize
+        };
+      }
+      
+      return { success: true, documents, hasMore };
+    } catch (error) {
+      logError('Get documents error:', error);
+      
+      if (error.message === 'Request timeout') {
+        return { success: false, error: 'Request timeout', documents: [], hasMore: false };
+      }
+      return { success: false, error: 'Failed to load documents', documents: [], hasMore: false };
+    } finally {
+      activeRequests.delete(cacheKey);
+    }
+  })();
+  
+  activeRequests.set(cacheKey, requestPromise);
+  return requestPromise;
+}
+
+async function clipContent(request) {
+  log('clipContent called');
+  
+  const cacheKey = 'clipContent';
+  
+  // Request deduplication
+  if (activeRequests.has(cacheKey)) {
+    log('Clip already in progress, returning existing request');
+    return activeRequests.get(cacheKey);
+  }
+  
+  const requestPromise = (async () => {
+    try {
+      const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
+      log('Got credentials for clip:', { serverUrl: serverUrl, hasToken: !!accessToken });
+      
+      if (!serverUrl || !accessToken) {
+        return { success: false, error: 'Not authenticated. Please reconnect.' };
+      }
+      
+      let documentId;
+      let globalId;
+      
+      // Create new document if needed
+      if (request.targetDoc.isNew) {
+        log('Creating new document:', request.targetDoc.title);
+        
+        const createUrl = `${serverUrl}/api/v1/documents`;
+        log('POST to:', createUrl);
+        
+        const createResponse = await fetchWithTimeout(createUrl, {
+          method: 'POST',
+          headers: {
+            'apiKey': accessToken,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: request.targetDoc.title,
+            tags: 'web-clipper',
+            fields: [{
+              content: ''
+            }]
+          })
+        });
+        
+        log('Create response status:', createResponse.status);
+        
+        if (!createResponse.ok) {
+          const errorText = await createResponse.text();
+          logError('Failed to create document:', createResponse.status, errorText);
+          
+          // Improved HTTP status code handling
+          if (createResponse.status === 401) {
+            return { success: false, error: 'Session expired. Please reconnect.' };
+          } else if (createResponse.status === 403) {
+            return { success: false, error: 'Permission denied. Check your access rights.' };
+          } else if (createResponse.status === 429) {
+            return { success: false, error: 'Too many requests. Please wait and try again.' };
+          } else if (createResponse.status >= 500) {
+            return { success: false, error: 'Server error. Please try again later.' };
+          }
+          
+          // Try to parse error for more details
+          let errorMessage = 'Failed to create document';
+          try {
+            const errorJson = JSON.parse(errorText);
+            if (errorJson.message || errorJson.error) {
+              errorMessage = errorJson.message || errorJson.error;
+            }
+          } catch (e) {
+            if (errorText && errorText.length < 100) {
+              errorMessage = errorText;
+            }
+          }
+          
+          return { success: false, error: errorMessage };
+        }
+        
+        const newDoc = await createResponse.json();
+        documentId = newDoc.id;
+        globalId = newDoc.globalId;
+        log('Created document with ID:', documentId);
+      } else {
+        documentId = request.targetDoc.id;
+        globalId = request.targetDoc.globalId;
+        log('Using existing document ID:', documentId);
+      }
+      
+      // Get current document content
+      log('Fetching document content for ID:', documentId);
+      
+      const getUrl = `${serverUrl}/api/v1/documents/${documentId}`;
+      log('GET from:', getUrl);
+      
+      const getResponse = await fetchWithTimeout(getUrl, {
+        headers: {
+          'apiKey': accessToken
+        }
+      });
+      
+      log('Get document response status:', getResponse.status);
+      
+      if (!getResponse.ok) {
+        const errorText = await getResponse.text();
+        logError('Failed to fetch document:', getResponse.status, errorText);
+        
+        // Improved HTTP status code handling
+        if (getResponse.status === 404) {
+          return { success: false, error: 'Document not found' };
+        } else if (getResponse.status === 401) {
+          return { success: false, error: 'Session expired' };
+        } else if (getResponse.status === 403) {
+          return { success: false, error: 'Access denied' };
+        }
+        
+        return { success: false, error: 'Failed to access document' };
+      }
+      
+      const doc = await getResponse.json();
+      log('Fetched document:', doc.name, 'with', doc.fields?.length, 'fields');
+      
+      // Check if document has multiple fields (Form-based documents)
+      if (doc.fields && doc.fields.length > 1) {
+        log('Document has multiple fields - cannot append to Form-based documents');
+        return { 
+          success: false, 
+          error: 'Cannot clip to Form-based documents.\n\nThis document has multiple form fields. The Web Clipper can only save to simple documents with one field.\n\nPlease select or create a regular document instead.' 
+        };
+      }
+      
+      // Check if document has no fields at all
+      if (!doc.fields || doc.fields.length === 0) {
+        log('Document has no fields');
+        return { 
+          success: false, 
+          error: 'Document has no editable fields.\n\nThis document cannot be edited. Please select a different document.' 
+        };
+      }
+      
+      // Prepare clipped content with security sanitization
+      const timestamp = formatTimestamp(new Date());
+      const clippedHtml = formatClippedContent(request, timestamp);
+      
+      // Append to document
+      const currentContent = doc.fields[0]?.content || '';
+      const updatedContent = currentContent + clippedHtml;
+      
+      log('Updating document with clipped content...');
+      
+      const updateUrl = `${serverUrl}/api/v1/documents/${documentId}`;
+      log('PUT to:', updateUrl);
+      
+      const updateResponse = await fetchWithTimeout(updateUrl, {
+        method: 'PUT',
+        headers: {
+          'apiKey': accessToken,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          fields: [{
+            id: doc.fields[0].id,
+            content: updatedContent
+          }]
+        })
+      });
+      
+      log('Update response status:', updateResponse.status);
+      
+      if (!updateResponse.ok) {
+        const errorText = await updateResponse.text();
+        logError('Failed to update document:', updateResponse.status, errorText);
+        
+        // Improved HTTP status code handling
+        if (updateResponse.status === 401) {
+          return { success: false, error: 'Session expired' };
+        } else if (updateResponse.status === 403) {
+          return { success: false, error: 'Access denied' };
+        } else if (updateResponse.status === 429) {
+          return { success: false, error: 'Too many requests' };
+        } else if (updateResponse.status >= 500) {
+          return { success: false, error: 'Server error' };
+        }
+        
+        return { success: false, error: 'Failed to save clipped content' };
+      }
+      
+      // Invalidate cache after successful clip
+      documentsCache = {
+        data: null,
+        timestamp: null,
+        ttl: 5 * 60 * 1000,
+        totalPages: null,
+        pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
+      };
+      
+      log('Successfully clipped content!');
+      return { success: true, documentId, globalId };
+    } catch (error) {
+      logError('Clip content error:', error);
+      
+      if (error.message === 'Request timeout') {
+        return { success: false, error: 'Request timeout. Please try again.' };
+      }
+      return { success: false, error: 'An error occurred while clipping' };
+    } finally {
+      activeRequests.delete(cacheKey);
+    }
+  })();
+  
+  activeRequests.set(cacheKey, requestPromise);
+  return requestPromise;
+}
+
+function formatTimestamp(date) {
+  // Format: YYYY-MM-DD HH:mm:ss TZ
+  // Example: 2026-01-08 14:35:22 GMT+1
+  
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  
+  // Get timezone offset in hours
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetHours = Math.floor(Math.abs(offsetMinutes) / 60);
+  const offsetMins = Math.abs(offsetMinutes) % 60;
+  const offsetSign = offsetMinutes >= 0 ? '+' : '-';
+  
+  // Format timezone as GMT+X or GMT+X:YY
+  let timezone = `GMT${offsetSign}${offsetHours}`;
+  if (offsetMins > 0) {
+    timezone += `:${String(offsetMins).padStart(2, '0')}`;
+  }
+  
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} ${timezone}`;
+}
+
+function formatClippedContent(request, timestamp) {
+  // Security: Escape all user-provided and external content
+  const safeUrl = escapeHtml(request.sourceUrl);
+  const safeTitle = escapeHtml(request.sourceTitle);
+  const safeNote = request.note ? escapeHtml(request.note) : '';
+  const safeTimestamp = escapeHtml(timestamp);
+  
+  let html = '<div style="border-left: 3px solid #4a90e2; padding-left: 12px; margin: 20px 0;">';
+  html += `<p style="color: #666; font-size: 0.9em; margin: 0 0 8px 0;">`;
+  html += `Clipped from <a href="${safeUrl}">${safeTitle}</a> on ${safeTimestamp}`;
+  html += `</p>`;
+  
+  if (safeNote) {
+    html += `<p style="background: #fffde7; padding: 8px; border-radius: 4px; margin: 8px 0;"><strong>Note:</strong> ${safeNote}</p>`;
+  }
+  
+  // Security: The content.html has already been sanitized by cleanHtml() in content.js
+  // But we add an extra layer of security here
+  html += `<div>${sanitizeClippedHtml(request.content.html)}</div>`;
+  html += '</div>';
+  
+  return html;
+}
+
+function sanitizeClippedHtml(html) {
+  // Additional security layer: ensure no dangerous patterns made it through
+  if (!html) return '';
+  
+  // Remove any remaining script tags or event handlers that might have slipped through
+  let cleaned = html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
+    .replace(/on\w+\s*=\s*[^\s>]*/gi, '')
+    .replace(/javascript:/gi, '')
+    .replace(/vbscript:/gi, '');
+  
+  return cleaned;
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
