@@ -21,21 +21,101 @@ let documentsCache = {
 // Request deduplication map
 const activeRequests = new Map();
 
+/**
+ * Shared HTTP error handler - converts HTTP status codes to user-friendly messages
+ * @param {Response} response - Fetch API response object
+ * @returns {string} User-friendly error message
+ */
+function getHttpErrorMessage(response) {
+  if (response.status === 401) {
+    return 'Session expired. Please reconnect.';
+  } else if (response.status === 403) {
+    return 'Permission denied. Check your access rights.';
+  } else if (response.status === 429) {
+    return 'Too many requests. Please wait and try again.';
+  } else if (response.status >= 500) {
+    return 'Server error. Please try again later.';
+  }
+  return 'Request failed. Please try again.';
+}
+
+/**
+ * Create a new RSpace document
+ * @param {string} serverUrl - RSpace server URL
+ * @param {string} accessToken - API access token
+ * @param {string} title - Document title
+ * @returns {Promise<{success: boolean, documentId?: number, globalId?: string, error?: string}>}
+ */
+async function createDocument(serverUrl, accessToken, title) {
+  log('Creating new document:', title);
+
+  const createUrl = `${serverUrl}/api/v1/documents`;
+  const createResponse = await fetchWithTimeout(createUrl, {
+    method: 'POST',
+    headers: {
+      'apiKey': accessToken,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: title,
+      tags: 'web-clipper',
+      fields: [{ content: '' }]
+    })
+  });
+
+  log('Create response status:', createResponse.status);
+
+  if (!createResponse.ok) {
+    const errorText = await createResponse.text();
+    logError('Failed to create document:', createResponse.status, errorText);
+
+    let errorMessage = getHttpErrorMessage(createResponse);
+
+    // Try to extract more specific error from response
+    try {
+      const errorJson = JSON.parse(errorText);
+      if (errorJson.message || errorJson.error) {
+        errorMessage = errorJson.message || errorJson.error;
+      }
+    } catch (e) {
+      if (errorText && errorText.length < 100) {
+        errorMessage = errorText;
+      }
+    }
+
+    return { success: false, error: errorMessage };
+  }
+
+  const newDoc = await createResponse.json();
+  log('Created document with ID:', newDoc.id);
+
+  return {
+    success: true,
+    documentId: newDoc.id,
+    globalId: newDoc.globalId
+  };
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   log('Background received message:', request.action);
-  
+
   if (request.action === 'startAuth') {
     handleAuth(request.serverUrl, request.apiKey).then(sendResponse);
     return true;
   }
-  
+
   if (request.action === 'getDocuments') {
     getDocuments(request.pageNumber || 0).then(sendResponse);
     return true;
   }
-  
+
   if (request.action === 'clipContent') {
     clipContent(request).then(sendResponse);
+    return true;
+  }
+
+  if (request.action === 'clipPdf') {
+    clipPdf(request).then(sendResponse);
     return true;
   }
 });
@@ -52,21 +132,14 @@ async function handleAuth(serverUrl, apiKey) {
     });
     
     log('API response status:', response.status);
-    
+
     if (!response.ok) {
-      // Improved HTTP status code handling
       if (response.status === 401) {
         return { success: false, error: 'Invalid API key' };
-      } else if (response.status === 403) {
-        return { success: false, error: 'Access denied. Please check your permissions.' };
       } else if (response.status === 404) {
         return { success: false, error: 'Server endpoint not found. Please check the URL.' };
-      } else if (response.status === 429) {
-        return { success: false, error: 'Too many requests. Please wait a moment and try again.' };
-      } else if (response.status >= 500) {
-        return { success: false, error: 'Server error. Please try again later.' };
       }
-      return { success: false, error: 'Invalid API key or server URL' };
+      return { success: false, error: getHttpErrorMessage(response) };
     }
     
     log('API key valid, storing credentials...');
@@ -148,19 +221,7 @@ async function getDocuments(pageNumber = 0) {
       
       if (!response.ok) {
         logError('Documents fetch failed:', response.status, response.statusText);
-        
-        // Improved HTTP status code handling
-        if (response.status === 401) {
-          return { success: false, error: 'Session expired', documents: [], hasMore: false };
-        } else if (response.status === 403) {
-          return { success: false, error: 'Access denied', documents: [], hasMore: false };
-        } else if (response.status === 429) {
-          return { success: false, error: 'Too many requests', documents: [], hasMore: false };
-        } else if (response.status >= 500) {
-          return { success: false, error: 'Server error', documents: [], hasMore: false };
-        }
-        
-        return { success: false, error: 'Failed to fetch documents', documents: [], hasMore: false };
+        return { success: false, error: getHttpErrorMessage(response), documents: [], hasMore: false };
       }
       
       const data = await response.json();
@@ -226,66 +287,14 @@ async function clipContent(request) {
       
       let documentId;
       let globalId;
-      
-      // Create new document if needed
+
       if (request.targetDoc.isNew) {
-        log('Creating new document:', request.targetDoc.title);
-        
-        const createUrl = `${serverUrl}/api/v1/documents`;
-        log('POST to:', createUrl);
-        
-        const createResponse = await fetchWithTimeout(createUrl, {
-          method: 'POST',
-          headers: {
-            'apiKey': accessToken,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            name: request.targetDoc.title,
-            tags: 'web-clipper',
-            fields: [{
-              content: ''
-            }]
-          })
-        });
-        
-        log('Create response status:', createResponse.status);
-        
-        if (!createResponse.ok) {
-          const errorText = await createResponse.text();
-          logError('Failed to create document:', createResponse.status, errorText);
-          
-          // Improved HTTP status code handling
-          if (createResponse.status === 401) {
-            return { success: false, error: 'Session expired. Please reconnect.' };
-          } else if (createResponse.status === 403) {
-            return { success: false, error: 'Permission denied. Check your access rights.' };
-          } else if (createResponse.status === 429) {
-            return { success: false, error: 'Too many requests. Please wait and try again.' };
-          } else if (createResponse.status >= 500) {
-            return { success: false, error: 'Server error. Please try again later.' };
-          }
-          
-          // Try to parse error for more details
-          let errorMessage = 'Failed to create document';
-          try {
-            const errorJson = JSON.parse(errorText);
-            if (errorJson.message || errorJson.error) {
-              errorMessage = errorJson.message || errorJson.error;
-            }
-          } catch (e) {
-            if (errorText && errorText.length < 100) {
-              errorMessage = errorText;
-            }
-          }
-          
-          return { success: false, error: errorMessage };
+        const result = await createDocument(serverUrl, accessToken, request.targetDoc.title);
+        if (!result.success) {
+          return result;
         }
-        
-        const newDoc = await createResponse.json();
-        documentId = newDoc.id;
-        globalId = newDoc.globalId;
-        log('Created document with ID:', documentId);
+        documentId = result.documentId;
+        globalId = result.globalId;
       } else {
         documentId = request.targetDoc.id;
         globalId = request.targetDoc.globalId;
@@ -491,4 +500,319 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+/**
+ * Clip PDF of current page to RSpace document
+ */
+async function clipPdf(request) {
+  log('clipPdf called');
+
+  const cacheKey = 'clipPdf';
+
+  // Request deduplication
+  if (activeRequests.has(cacheKey)) {
+    log('PDF clip already in progress, returning existing request');
+    return activeRequests.get(cacheKey);
+  }
+
+  const requestPromise = (async () => {
+    try {
+      const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
+      log('Got credentials for PDF clip:', { serverUrl: serverUrl, hasToken: !!accessToken });
+
+      if (!serverUrl || !accessToken) {
+        return { success: false, error: 'Not authenticated. Please reconnect.' };
+      }
+
+      // Step 1: Generate PDF from current tab
+      log('Generating PDF from tab:', request.tabId);
+      const pdfData = await generatePdfFromTab(request.tabId);
+
+      if (!pdfData) {
+        return { success: false, error: 'Failed to generate PDF from page' };
+      }
+
+      // Step 2: Determine target document
+      let documentId;
+      let globalId;
+
+      if (request.targetDoc.isNew) {
+        const result = await createDocument(serverUrl, accessToken, request.targetDoc.title);
+        if (!result.success) {
+          return result;
+        }
+        documentId = result.documentId;
+        globalId = result.globalId;
+      } else {
+        documentId = request.targetDoc.id;
+        globalId = request.targetDoc.globalId;
+        log('Using existing document ID:', documentId);
+      }
+
+      // Step 3: Upload PDF as file to RSpace
+      log('Uploading PDF file to RSpace...');
+      const fileName = `${sanitizeFilename(request.sourceTitle || 'page')}.pdf`;
+      const fileId = await uploadPdfToRSpace(serverUrl, accessToken, pdfData, fileName);
+
+      if (!fileId) {
+        return { success: false, error: 'Failed to upload PDF file' };
+      }
+
+      log('PDF uploaded with file ID:', fileId);
+
+      // Step 4: Link the file to the document
+      log('Linking PDF to document...');
+      const linkSuccess = await linkFileToDocument(serverUrl, accessToken, documentId, fileId, request);
+
+      if (!linkSuccess) {
+        return { success: false, error: 'Failed to link PDF to document' };
+      }
+
+      // Invalidate cache after successful clip
+      documentsCache = {
+        data: null,
+        timestamp: null,
+        ttl: 5 * 60 * 1000,
+        totalPages: null,
+        pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
+      };
+
+      log('Successfully clipped PDF!');
+      return { success: true, documentId, globalId };
+    } catch (error) {
+      logError('Clip PDF error:', error);
+
+      if (error.message === 'Request timeout') {
+        return { success: false, error: 'Request timeout. Please try again.' };
+      }
+      return { success: false, error: 'An error occurred while clipping PDF: ' + error.message };
+    } finally {
+      activeRequests.delete(cacheKey);
+    }
+  })();
+
+  activeRequests.set(cacheKey, requestPromise);
+  return requestPromise;
+}
+
+/**
+ * Generate PDF from tab using Chrome's native capabilities
+ * Note: Chrome extensions don't have direct access to chrome.tabs.printToPDF
+ * This implementation uses a hybrid approach with content script libraries
+ */
+async function generatePdfFromTab(tabId) {
+  try {
+    log('Attempting to generate PDF from tab...');
+
+    // Chrome extensions cannot directly use chrome.tabs.printToPDF
+    // That API is only available to Chrome Apps (deprecated) and headless Chrome
+    //
+    // Instead, we use html2canvas + jsPDF libraries via content script
+    // Libraries are bundled and loaded via manifest.json content_scripts
+
+    // Content script is already loaded via manifest.json, just send message
+    log('Sending printPage message to content script...');
+    const result = await chrome.tabs.sendMessage(tabId, { action: 'printPage' });
+
+    log('Received response from content script:', result);
+
+    if (result && result.pdfData) {
+      log('PDF generated successfully via content script');
+      return result.pdfData;
+    }
+
+    if (result && result.error) {
+      logError('Content script returned error:', result.error);
+      if (result.details) {
+        logError('Error details:', result.details);
+      }
+      throw new Error(result.error);
+    }
+
+    // If we get here, PDF generation failed with no error message
+    logError('Failed to generate PDF - no data or error returned from content script');
+    throw new Error('PDF generation failed - please check browser console for details');
+  } catch (error) {
+    logError('Error generating PDF:', error);
+
+    // Provide helpful error message
+    if (error.message && error.message.includes('Could not establish connection')) {
+      logError('Content script not responding - page may need refresh');
+    }
+
+    return null;
+  }
+}
+
+/**
+ * Upload PDF blob to RSpace files API
+ */
+async function uploadPdfToRSpace(serverUrl, accessToken, pdfDataUrl, fileName) {
+  try {
+    // Convert data URL to blob
+    const response = await fetch(pdfDataUrl);
+    const blob = await response.blob();
+
+    // Create FormData for file upload
+    const formData = new FormData();
+    formData.append('file', blob, fileName);
+
+    log('Uploading file to RSpace API...');
+    const uploadUrl = `${serverUrl}/api/v1/files`;
+
+    const uploadResponse = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'apiKey': accessToken
+      },
+      body: formData
+    });
+
+    if (!uploadResponse.ok) {
+      const errorText = await uploadResponse.text();
+      logError('File upload failed:', uploadResponse.status, errorText);
+      return null;
+    }
+
+    const data = await uploadResponse.json();
+    log('File uploaded successfully:', data);
+
+    // Extract file ID (try direct id, then globalId, then _links.self)
+    const fileId = data.id ||
+                   data.globalId?.match(/GL(\d+)/)?.[1] ||
+                   data._links?.self?.match(/\/files\/(\d+)/)?.[1];
+
+    if (!fileId) {
+      logError('Could not extract file ID from upload response:', data);
+    } else {
+      log('Extracted file ID:', fileId);
+    }
+
+    return fileId;
+  } catch (error) {
+    logError('Error uploading PDF:', error);
+    return null;
+  }
+}
+
+/**
+ * Link uploaded file to document by appending HTML reference
+ */
+async function linkFileToDocument(serverUrl, accessToken, documentId, fileId, request) {
+  try {
+    // Get current document content
+    const getUrl = `${serverUrl}/api/v1/documents/${documentId}`;
+    const getResponse = await fetchWithTimeout(getUrl, {
+      headers: {
+        'apiKey': accessToken
+      }
+    });
+
+    if (!getResponse.ok) {
+      logError('Failed to fetch document:', getResponse.status);
+      return false;
+    }
+
+    const doc = await getResponse.json();
+
+    // Check if document has multiple fields (Form-based documents)
+    if (doc.fields && doc.fields.length > 1) {
+      logError('Document has multiple fields - cannot append to Form-based documents');
+      return false;
+    }
+
+    if (!doc.fields || doc.fields.length === 0) {
+      logError('Document has no fields');
+      return false;
+    }
+
+    // Prepare PDF reference content
+    const timestamp = formatTimestamp(new Date());
+    const safeUrl = escapeHtml(request.sourceUrl);
+    const safeTitle = escapeHtml(request.sourceTitle);
+    const safeNote = request.note ? escapeHtml(request.note) : '';
+    const safeTimestamp = escapeHtml(timestamp);
+
+    // Add file using RSpace's special syntax for file linking
+    // RSpace will automatically convert <fileId=X> to the proper attachment HTML
+    log(`Linking file using RSpace API syntax: <fileId=${fileId}>`);
+
+    const html = `
+      <div style="border-left: 3px solid #4a90e2; padding-left: 12px; margin: 20px 0;">
+        <p style="color: #666; font-size: 0.9em; margin: 0 0 8px 0;">
+          PDF clipped from <a href="${safeUrl}">${safeTitle}</a> on ${safeTimestamp}
+        </p>
+        ${safeNote ? `
+        <p style="background: #fffde7; padding: 8px; border-radius: 4px; margin: 8px 0;">
+          <strong>Note:</strong> ${safeNote}
+        </p>
+        ` : ''}
+        <p><fileId=${fileId}></p>
+      </div>
+    `.trim();
+
+    // Append to document
+    const currentContent = doc.fields[0]?.content || '';
+    const updatedContent = currentContent + html;
+
+    // Update document
+    const updateUrl = `${serverUrl}/api/v1/documents/${documentId}`;
+    const updateResponse = await fetchWithTimeout(updateUrl, {
+      method: 'PUT',
+      headers: {
+        'apiKey': accessToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        fields: [{
+          id: doc.fields[0].id,
+          content: updatedContent
+        }]
+      })
+    });
+
+    if (!updateResponse.ok) {
+      logError('Failed to update document:', updateResponse.status);
+      return false;
+    }
+
+    log('Document updated with PDF reference');
+    return true;
+  } catch (error) {
+    logError('Error linking file to document:', error);
+    return false;
+  }
+}
+
+/**
+ * Sanitize filename for safe file upload
+ */
+function sanitizeFilename(filename) {
+  return filename
+    .replace(/[^a-zA-Z0-9_\-\.]/g, '_')
+    .substring(0, 100);
+}
+
+/**
+ * Fetch with timeout wrapper
+ */
+async function fetchWithTimeout(url, options = {}, timeout = CONFIG.API.TIMEOUT_MS || 30000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error.name === 'AbortError') {
+      throw new Error('Request timeout');
+    }
+    throw error;
+  }
 }

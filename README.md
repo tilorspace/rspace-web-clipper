@@ -4,6 +4,7 @@ Save web content from Chromium based browsers directly to your RSpace documents 
 
 ## Features
 - ✅ Quick saving of web content
+- ✅ **NEW: Save entire pages as PDF files**
 - ✅ Auto-capture source URL and ISO timestamp
 - ✅ Add notes (optional)
 - ✅ Save to existing or new RSpace documents
@@ -38,6 +39,7 @@ Save web content from Chromium based browsers directly to your RSpace documents 
    - **Selection** - text you selected in your browser window
    - **Full Page** - entire page (representation in RSpace might deviate)
    - **URL Only** - just the link and the page tile
+   - **PDF** - 🆕 save entire page as PDF file attached to document
 4. Select a document (or create a new one) ⚠️ *currently only works with simple documents and not yet with Forms*
 5. (Optional) Add any additional comments
 6. Click **Save to RSpace**

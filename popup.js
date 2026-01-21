@@ -385,6 +385,11 @@ async function handleClip() {
   const contentType = document.querySelector('input[name="content-type"]:checked').value;
   const note = elements.note.value;
   const docName = elements.documentSearch.value.trim();
+
+  // Handle PDF clipping separately
+  if (contentType === 'pdf') {
+    return handlePdfClip();
+  }
   
   // Security: Input validation
   if (!docName) {
@@ -519,6 +524,107 @@ async function handleClip() {
       errorMsg = '⚠️ Content script not loaded.\n\nPlease:\n1. Refresh the page\n2. Click the extension icon again\n3. Try clipping\n\nTechnical details: ' + error.message;
     }
     
+    showError('clip-error', errorMsg);
+  } finally {
+    elements.clipBtn.disabled = false;
+    elements.clipBtn.textContent = 'Save to RSpace';
+  }
+}
+
+/**
+ * Handle PDF clipping workflow
+ */
+async function handlePdfClip() {
+  const note = elements.note.value;
+  const docName = elements.documentSearch.value.trim();
+
+  // Security: Input validation
+  if (!docName) {
+    showError('clip-error', 'Please enter a document name');
+    return;
+  }
+
+  if (docName.length > MAX_DOC_TITLE_LENGTH) {
+    showError('clip-error', `Document name too long (max ${MAX_DOC_TITLE_LENGTH} characters)`);
+    return;
+  }
+
+  if (note && note.length > MAX_NOTE_LENGTH) {
+    showError('clip-error', `Note too long (max ${MAX_NOTE_LENGTH} characters)`);
+    return;
+  }
+
+  // Determine target document: use selected or create new
+  let targetDoc = null;
+  if (selectedDocument && selectedDocument.name === docName) {
+    targetDoc = { isNew: false, id: selectedDocument.id, globalId: selectedDocument.globalId };
+  } else {
+    targetDoc = { isNew: true, title: docName };
+  }
+
+  // Show loading state
+  elements.clipBtn.disabled = true;
+  elements.clipBtn.textContent = 'Generating PDF...';
+  showScreen('loading-screen');
+
+  try {
+    // Get current tab
+    const tabs = await queryTabsAsync({ active: true, currentWindow: true });
+
+    if (!tabs || tabs.length === 0) {
+      showScreen('clipper-screen');
+      showError('clip-error', 'No active tab found. Please try again.');
+      elements.clipBtn.disabled = false;
+      elements.clipBtn.textContent = 'Save to RSpace';
+      return;
+    }
+
+    const tab = tabs[0];
+
+    // Send PDF clip request to background script
+    const response = await sendMessageAsync({
+      action: 'clipPdf',
+      targetDoc,
+      note: note || '',
+      sourceUrl: tab.url,
+      sourceTitle: tab.title,
+      tabId: tab.id
+    });
+
+    showScreen('clipper-screen');
+
+    if (response && response.success) {
+      // Get server URL for link
+      const storage = await chrome.storage.session.get(['serverUrl']);
+      const serverUrl = storage.serverUrl;
+
+      showSuccessWithLink(
+        'clip-success',
+        'PDF saved successfully!',
+        response.documentId,
+        response.globalId,
+        serverUrl
+      );
+
+      // Clear the note field
+      elements.note.value = '';
+
+      // Reload documents to show newly created document (if any)
+      await loadDocuments();
+    } else {
+      showError('clip-error', response?.error || 'Failed to save PDF');
+    }
+  } catch (error) {
+    showScreen('clipper-screen');
+    logError('PDF clip error:', error);
+
+    let errorMsg = 'An error occurred while saving PDF: ' + error.message;
+
+    // Provide helpful error messages
+    if (error.message.includes('PDF generation')) {
+      errorMsg = '⚠️ PDF generation failed.\n\nThis feature requires browser print support. Some pages may not be compatible.\n\nTip: Try using "Full Page" or "Selection" mode instead.';
+    }
+
     showError('clip-error', errorMsg);
   } finally {
     elements.clipBtn.disabled = false;

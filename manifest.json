@@ -6,7 +6,8 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "http://*/*",
@@ -26,7 +27,11 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": [
+        "html2canvas.min.js",
+        "jspdf.umd.min.js",
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

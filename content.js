@@ -10,13 +10,13 @@ const VALID_CONTENT_TYPES = ['selection', 'full-page', 'url-only'];
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   log('Content script received message:', request);
-  
+
   // Respond to ping to confirm content script is loaded
   if (request.action === 'ping') {
     sendResponse({ status: 'ready' });
     return true;
   }
-  
+
   if (request.action === 'getContent') {
     try {
       // Validate contentType before processing
@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse(null);
         return true;
       }
-      
+
       const content = extractContent(request.contentType);
       log('Extracted content:', content);
       sendResponse(content);
@@ -33,8 +33,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       logError('Error extracting content:', error);
       sendResponse(null);
     }
+    return true;
   }
-  return true;
+
+  if (request.action === 'printPage') {
+    log('Content script received printPage message');
+
+    // Libraries are already loaded via manifest.json, just generate PDF
+    printPageToPdf().then(result => {
+      log('Sending PDF result back to background script');
+      sendResponse(result);
+    }).catch(error => {
+      console.error('Error in printPageToPdf:', error);
+      sendResponse({ success: false, error: error.message });
+    });
+
+    return true; // Keep message channel open for async response
+  }
+
+  return false; // No handler matched
 });
 
 /**
@@ -212,4 +229,96 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+// PDF generation configuration
+const PDF_CONFIG = {
+  // Canvas rendering settings
+  CANVAS_SCALE: 1,                    // Scale factor for canvas rendering (1 = original size)
+  JPEG_QUALITY: 0.8,                  // JPEG compression quality (0.0 - 1.0)
+  USE_CORS: true,                     // Allow cross-origin images
+  ALLOW_TAINT: false,                 // Security: don't allow tainted canvas
+  BACKGROUND_COLOR: '#ffffff',        // Default white background
+
+  // PDF document settings
+  ORIENTATION: 'portrait',            // Page orientation (portrait/landscape)
+  UNIT: 'mm',                         // Measurement units
+  FORMAT: 'a4',                       // Paper format
+
+  // Layout settings
+  MARGIN_MM: 10,                      // Page margins in millimeters
+};
+
+/**
+ * Generate PDF from current page using html2canvas and jsPDF
+ * @returns {Promise<{pdfData: string}>} Promise resolving to PDF data as data URL
+ */
+async function printPageToPdf() {
+  log('printPageToPdf: Starting PDF generation...');
+
+  try {
+    // Libraries are now bundled, so they should be available immediately
+    if (typeof html2canvas === 'undefined') {
+      throw new Error('html2canvas library not available. Make sure html2canvas.min.js is loaded before content.js in manifest.json');
+    }
+    if (typeof jspdf === 'undefined') {
+      throw new Error('jsPDF library not available. Make sure jspdf.umd.min.js is loaded before content.js in manifest.json');
+    }
+
+    log('Libraries confirmed available');
+    log('Capturing page with html2canvas...');
+    const canvas = await html2canvas(document.body, {
+      scale: PDF_CONFIG.CANVAS_SCALE,
+      useCORS: PDF_CONFIG.USE_CORS,
+      logging: DEBUG,
+      windowWidth: document.documentElement.scrollWidth,
+      windowHeight: document.documentElement.scrollHeight,
+      allowTaint: PDF_CONFIG.ALLOW_TAINT,
+      backgroundColor: PDF_CONFIG.BACKGROUND_COLOR
+    });
+
+    log(`Canvas captured: ${canvas.width}x${canvas.height}px`);
+
+    const imgData = canvas.toDataURL('image/jpeg', PDF_CONFIG.JPEG_QUALITY);
+    log(`Image data created, size: ${Math.round(imgData.length / 1024)} KB`);
+    const pdf = new jspdf.jsPDF({
+      orientation: PDF_CONFIG.ORIENTATION,
+      unit: PDF_CONFIG.UNIT,
+      format: PDF_CONFIG.FORMAT
+    });
+
+    const pdfWidth = pdf.internal.pageSize.getWidth();
+    const pdfHeight = pdf.internal.pageSize.getHeight();
+    const marginDouble = PDF_CONFIG.MARGIN_MM * 2;
+    const imgWidth = pdfWidth - marginDouble;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+    let heightLeft = imgHeight;
+    let position = PDF_CONFIG.MARGIN_MM;
+
+    pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, position, imgWidth, imgHeight);
+    heightLeft -= (pdfHeight - marginDouble);
+
+    while (heightLeft > 0) {
+      position = heightLeft - imgHeight + PDF_CONFIG.MARGIN_MM;
+      pdf.addPage();
+      pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, position, imgWidth, imgHeight);
+      heightLeft -= (pdfHeight - marginDouble);
+    }
+
+    const pdfData = pdf.output('dataurlstring');
+    log(`PDF generated successfully, size: ${Math.round(pdfData.length / 1024)} KB`);
+
+    return {
+      pdfData: pdfData,
+      success: true
+    };
+
+  } catch (error) {
+    console.error('PDF generation failed:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
 }
