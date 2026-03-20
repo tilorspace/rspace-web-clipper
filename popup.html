@@ -113,6 +113,15 @@
       
       <!-- Section 4: Sticky footer - Note, Save button, Settings -->
       <div class="sticky-footer">
+        <!-- Field selector: shown only when a Form-based document is selected -->
+        <div id="field-selector-section" class="field-selector-group" style="display:none;">
+          <label for="field-select">Save to field</label>
+          <select id="field-select" aria-label="Select form field"></select>
+          <p id="no-compatible-fields-msg" class="field-incompatible-msg" style="display:none;">
+            No compatible fields for this content type
+          </p>
+        </div>
+
         <div class="note-group">
           <textarea id="note" rows="1" placeholder="Add note (optional)"></textarea>
         </div>

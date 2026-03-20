@@ -247,6 +247,49 @@ body {
   background: #b0b0b0;
 }
 
+/* Field selector (shown for Form-based documents) */
+.field-selector-group {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+select {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-small);
+  font-size: 14px;
+  font-family: 'Inter', sans-serif;
+  background: var(--lighter-interactive-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+select:focus {
+  outline: none;
+  border-color: var(--interactive-color);
+  box-shadow: 0 0 0 3px var(--rspace-blue-light);
+}
+
+select:focus-visible {
+  outline: 2px solid var(--interactive-color);
+  outline-offset: -2px;
+  border-color: var(--interactive-color);
+}
+
+.field-incompatible-msg {
+  margin: 8px 0 0 0;
+  padding: 8px 12px;
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid var(--error);
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* Section 4: Sticky footer (note + buttons) */
 .sticky-footer {
   flex-shrink: 0;

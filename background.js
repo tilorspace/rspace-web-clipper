@@ -118,6 +118,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     clipPdf(request).then(sendResponse);
     return true;
   }
+
+  if (request.action === 'getDocumentFields') {
+    getDocumentFields(request.documentId).then(sendResponse);
+    return true;
+  }
 });
 
 async function handleAuth(serverUrl, apiKey) {
@@ -265,6 +270,47 @@ async function getDocuments(pageNumber = 0) {
   return requestPromise;
 }
 
+/**
+ * Fetch fields for a document — used by the popup to determine if field selection is needed
+ * @param {number} documentId
+ * @returns {Promise<{success: boolean, isFormDoc: boolean, fields: Array, error?: string}>}
+ */
+async function getDocumentFields(documentId) {
+  try {
+    const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
+    if (!serverUrl || !accessToken) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    const response = await fetchWithTimeout(`${serverUrl}/api/v1/documents/${documentId}`, {
+      headers: { 'apiKey': accessToken }
+    });
+
+    if (!response.ok) {
+      return { success: false, error: getHttpErrorMessage(response) };
+    }
+
+    const doc = await response.json();
+    const fields = (doc.fields || []).map(f => ({
+      id: f.id,
+      name: f.name,
+      type: f.type  // e.g. "TEXT", "STRING", "NUMBER", etc.
+    }));
+
+    return {
+      success: true,
+      isFormDoc: fields.length > 1,
+      fields
+    };
+  } catch (error) {
+    logError('getDocumentFields error:', error);
+    if (error.message === 'Request timeout') {
+      return { success: false, error: 'Request timeout' };
+    }
+    return { success: false, error: 'Failed to load document fields' };
+  }
+}
+
 async function clipContent(request) {
   log('clipContent called');
   
@@ -333,38 +379,45 @@ async function clipContent(request) {
       
       const doc = await getResponse.json();
       log('Fetched document:', doc.name, 'with', doc.fields?.length, 'fields');
-      
-      // Check if document has multiple fields (Form-based documents)
-      if (doc.fields && doc.fields.length > 1) {
-        log('Document has multiple fields - cannot append to Form-based documents');
-        return { 
-          success: false, 
-          error: 'Cannot clip to Form-based documents.\n\nThis document has multiple form fields. The Web Clipper can only save to simple documents with one field.\n\nPlease select or create a regular document instead.' 
-        };
-      }
-      
+
       // Check if document has no fields at all
       if (!doc.fields || doc.fields.length === 0) {
         log('Document has no fields');
-        return { 
-          success: false, 
-          error: 'Document has no editable fields.\n\nThis document cannot be edited. Please select a different document.' 
+        return {
+          success: false,
+          error: 'Document has no editable fields.\n\nThis document cannot be edited. Please select a different document.'
         };
       }
-      
+
+      // Resolve which field to write to
+      let targetField;
+      if (request.targetField) {
+        // Form document: use the field the user selected in the popup
+        targetField = doc.fields.find(f => f.id === request.targetField.id);
+        if (!targetField) {
+          return { success: false, error: 'Selected field not found in document. Please re-select the document and try again.' };
+        }
+      } else if (doc.fields.length === 1) {
+        // Simple document: use the only field
+        targetField = doc.fields[0];
+      } else {
+        // Form document but no field was chosen — shouldn't happen when UI is correct
+        return { success: false, error: 'This document has multiple fields. Please select a field to save to.' };
+      }
+
       // Prepare clipped content with security sanitization
       const timestamp = formatTimestamp(new Date());
       const clippedHtml = formatClippedContent(request, timestamp);
-      
-      // Append to document
-      const currentContent = doc.fields[0]?.content || '';
+
+      // Append to chosen field
+      const currentContent = targetField.content || '';
       const updatedContent = currentContent + clippedHtml;
-      
+
       log('Updating document with clipped content...');
-      
+
       const updateUrl = `${serverUrl}/api/v1/documents/${documentId}`;
       log('PUT to:', updateUrl);
-      
+
       const updateResponse = await fetchWithTimeout(updateUrl, {
         method: 'PUT',
         headers: {
@@ -373,7 +426,7 @@ async function clipContent(request) {
         },
         body: JSON.stringify({
           fields: [{
-            id: doc.fields[0].id,
+            id: targetField.id,
             content: updatedContent
           }]
         })
@@ -716,14 +769,23 @@ async function linkFileToDocument(serverUrl, accessToken, documentId, fileId, re
 
     const doc = await getResponse.json();
 
-    // Check if document has multiple fields (Form-based documents)
-    if (doc.fields && doc.fields.length > 1) {
-      logError('Document has multiple fields - cannot append to Form-based documents');
+    if (!doc.fields || doc.fields.length === 0) {
+      logError('Document has no fields');
       return false;
     }
 
-    if (!doc.fields || doc.fields.length === 0) {
-      logError('Document has no fields');
+    // Resolve which field to write to
+    let targetField;
+    if (request.targetField) {
+      targetField = doc.fields.find(f => f.id === request.targetField.id);
+      if (!targetField) {
+        logError('Selected field not found in document');
+        return false;
+      }
+    } else if (doc.fields.length === 1) {
+      targetField = doc.fields[0];
+    } else {
+      logError('Form document - no field selected for PDF clip');
       return false;
     }
 
@@ -752,8 +814,8 @@ async function linkFileToDocument(serverUrl, accessToken, documentId, fileId, re
       </div>
     `.trim();
 
-    // Append to document
-    const currentContent = doc.fields[0]?.content || '';
+    // Append to chosen field
+    const currentContent = targetField.content || '';
     const updatedContent = currentContent + html;
 
     // Update document
@@ -766,7 +828,7 @@ async function linkFileToDocument(serverUrl, accessToken, documentId, fileId, re
       },
       body: JSON.stringify({
         fields: [{
-          id: doc.fields[0].id,
+          id: targetField.id,
           content: updatedContent
         }]
       })

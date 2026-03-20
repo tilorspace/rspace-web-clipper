@@ -5,6 +5,8 @@ const logError = DEBUG ? console.error : () => {};
 
 // State management
 let selectedDocument = null;
+let selectedField = null;      // { id, name, type } for Form docs, null for simple docs
+let currentDocFields = null;   // full field list when a Form doc is selected, null otherwise
 let documents = [];
 let searchTimeout = null;
 let currentPage = 0;
@@ -58,6 +60,11 @@ function cacheElements() {
   elements.clipError = document.getElementById('clip-error');
   elements.clipSuccess = document.getElementById('clip-success');
   elements.emptyState = document.getElementById('empty-state');
+
+  // Field selector (for Form-based documents)
+  elements.fieldSelectorSection = document.getElementById('field-selector-section');
+  elements.fieldSelect = document.getElementById('field-select');
+  elements.noCompatibleFieldsMsg = document.getElementById('no-compatible-fields-msg');
   
   // NEW: Remember checkboxes and clear button
   elements.rememberServer = document.getElementById('remember-server');
@@ -173,6 +180,20 @@ function setupEventListeners() {
   // Infinite scroll for documents (replaces Load More button)
   if (elements.documentSection) {
     elements.documentSection.addEventListener('scroll', handleInfiniteScroll);
+  }
+
+  // When content type changes, re-filter the field selector for Form docs
+  document.querySelectorAll('input[name="content-type"]').forEach(radio => {
+    radio.addEventListener('change', (e) => {
+      if (currentDocFields) {
+        updateFieldSelector(e.target.value);
+      }
+    });
+  });
+
+  // Field selection change
+  if (elements.fieldSelect) {
+    elements.fieldSelect.addEventListener('change', handleFieldSelectChange);
   }
   
   // Support Enter key in document search
@@ -415,6 +436,12 @@ async function handleClip() {
     targetDoc = { isNew: true, title: docName };
   }
 
+  // If a Form document is selected, a field must be chosen
+  if (currentDocFields !== null && !selectedField) {
+    showError('clip-error', 'Please select a field to save to');
+    return;
+  }
+
   // Show loading state
   elements.clipBtn.disabled = true;
   elements.clipBtn.textContent = 'Saving...';
@@ -478,6 +505,7 @@ async function handleClip() {
     const response = await sendMessageAsync({
       action: 'clipContent',
       targetDoc,
+      targetField: selectedField || null,
       content,
       note: note || '',
       sourceUrl: tab.url,
@@ -562,6 +590,12 @@ async function handlePdfClip() {
     targetDoc = { isNew: true, title: docName };
   }
 
+  // If a Form document is selected, a field must be chosen
+  if (currentDocFields !== null && !selectedField) {
+    showError('clip-error', 'Please select a field to save to');
+    return;
+  }
+
   // Show loading state
   elements.clipBtn.disabled = true;
   elements.clipBtn.textContent = 'Generating PDF...';
@@ -585,6 +619,7 @@ async function handlePdfClip() {
     const response = await sendMessageAsync({
       action: 'clipPdf',
       targetDoc,
+      targetField: selectedField || null,
       note: note || '',
       sourceUrl: tab.url,
       sourceTitle: tab.title,
@@ -725,12 +760,17 @@ function handleInfiniteScroll() {
 }
 
 
-function handleDocumentSearch(e) {
-  // Debounce search input
+function handleDocumentSearch() {
+  // Clear field state immediately — it's only restored by clicking a document
+  currentDocFields = null;
+  selectedField = null;
+  hideFieldSelector();
+
+  // Debounce the rest
   clearTimeout(searchTimeout);
   searchTimeout = setTimeout(() => {
-    const query = e.target.value.toLowerCase().trim();
-    
+    const query = elements.documentSearch.value.toLowerCase().trim();
+
     if (!query) {
       // Show all documents when search is empty
       selectedDocument = null;
@@ -738,24 +778,24 @@ function handleDocumentSearch(e) {
       hideCreateHint();
       return;
     }
-    
-    const filtered = documents.filter(doc => 
+
+    const filtered = documents.filter(doc =>
       doc.name.toLowerCase().includes(query)
     );
-    
+
     // Check if there's an exact match
-    const exactMatch = documents.find(doc => 
+    const exactMatch = documents.find(doc =>
       doc.name.toLowerCase() === query
     );
-    
+
     if (exactMatch) {
       selectedDocument = exactMatch;
     } else {
       selectedDocument = null;
     }
-    
+
     renderDocuments(filtered);
-    
+
     // Show create hint if no exact match found and query is not empty
     if (!exactMatch && query) {
       showCreateHint();
@@ -789,7 +829,7 @@ function renderDocuments(docs) {
       item.setAttribute('aria-selected', 'false');
     }
     
-    const selectDocument = () => {
+    const selectDocument = async () => {
       document.querySelectorAll('.document-item').forEach(i => {
         i.classList.remove('selected');
         i.setAttribute('aria-selected', 'false');
@@ -799,6 +839,12 @@ function renderDocuments(docs) {
       selectedDocument = doc;
       elements.documentSearch.value = doc.name;
       hideCreateHint();
+
+      // Reset field state, then fetch fields for this document
+      currentDocFields = null;
+      selectedField = null;
+      hideFieldSelector();
+      await fetchAndShowFieldSelector(doc.id);
     };
     
     // Click handler
@@ -1111,6 +1157,121 @@ function validateStoredUrl(url) {
     logError('URL validation error:', error);
     return null;
   }
+}
+
+// ===== FORM FIELD SELECTOR =====
+
+/**
+ * Fetch fields for the selected document and show the field selector if it's a Form doc.
+ * Guards against race conditions when the user clicks documents quickly.
+ */
+async function fetchAndShowFieldSelector(documentId) {
+  try {
+    const response = await sendMessageAsync({
+      action: 'getDocumentFields',
+      documentId
+    });
+
+    // If the user has since selected a different document, discard this response
+    if (!selectedDocument || selectedDocument.id !== documentId) {
+      return;
+    }
+
+    if (!response || !response.success) {
+      // Silently fail — the user will get a clear error if they try to save to a Form doc
+      return;
+    }
+
+    if (!response.isFormDoc) {
+      // Simple document — no field selector needed
+      currentDocFields = null;
+      return;
+    }
+
+    // Form document — cache fields and render the selector
+    currentDocFields = response.fields;
+    const contentType = document.querySelector('input[name="content-type"]:checked').value;
+    updateFieldSelector(contentType);
+  } catch (error) {
+    logError('Error fetching document fields:', error);
+    // Silently fail
+  }
+}
+
+/**
+ * Filter the cached fields by content type and refresh the selector UI.
+ */
+function updateFieldSelector(contentType) {
+  if (!currentDocFields) {
+    hideFieldSelector();
+    return;
+  }
+
+  const compatibleFields = getCompatibleFields(currentDocFields, contentType);
+  showFieldSelector(compatibleFields);
+}
+
+/**
+ * Return fields that can accept the given content type.
+ * For MVP all clip types produce HTML/rich content, so only TEXT fields qualify.
+ */
+function getCompatibleFields(fields, contentType) {
+  return fields.filter(f => f.type && f.type.toUpperCase() === 'TEXT');
+}
+
+/**
+ * Populate and show the field selector dropdown.
+ * If compatibleFields is empty, shows the incompatible-fields message instead.
+ */
+function showFieldSelector(compatibleFields) {
+  if (!elements.fieldSelectorSection) return;
+
+  elements.fieldSelectorSection.style.display = 'block';
+
+  if (compatibleFields.length === 0) {
+    elements.fieldSelect.style.display = 'none';
+    elements.noCompatibleFieldsMsg.style.display = 'block';
+    elements.clipBtn.disabled = true;
+    selectedField = null;
+    return;
+  }
+
+  // Re-enable save (might have been disabled by a previous incompatible state)
+  elements.clipBtn.disabled = false;
+  elements.fieldSelect.style.display = 'block';
+  elements.noCompatibleFieldsMsg.style.display = 'none';
+
+  // Rebuild options
+  elements.fieldSelect.innerHTML = '';
+  compatibleFields.forEach(field => {
+    const option = document.createElement('option');
+    option.value = field.id;
+    option.textContent = field.name;
+    elements.fieldSelect.appendChild(option);
+  });
+
+  // Auto-select the first compatible field
+  selectedField = compatibleFields[0];
+}
+
+/**
+ * Hide the field selector and reset field state.
+ */
+function hideFieldSelector() {
+  if (!elements.fieldSelectorSection) return;
+  elements.fieldSelectorSection.style.display = 'none';
+  elements.fieldSelect.innerHTML = '';
+  elements.noCompatibleFieldsMsg.style.display = 'none';
+  if (elements.clipBtn) elements.clipBtn.disabled = false;
+}
+
+/**
+ * Sync selectedField when the user picks a different option in the dropdown.
+ */
+function handleFieldSelectChange() {
+  if (!currentDocFields || !elements.fieldSelect) return;
+  const selectedId = parseInt(elements.fieldSelect.value, 10);
+  selectedField = currentDocFields.find(f => f.id === selectedId) || null;
 }
 
 /**
