@@ -328,7 +328,25 @@ async function handleConnect() {
 
   // Normalize URL (remove trailing slash)
   const normalizedUrl = serverUrl.replace(/\/$/, '');
-  
+
+  // Request host permission for this specific server origin.
+  // This keeps the extension's required permissions minimal — we only ask for
+  // access to the user's own RSpace server, not all websites.
+  const serverOrigin = url.origin; // e.g. "https://rspace.myuni.edu"
+  try {
+    const granted = await chrome.permissions.request({
+      origins: [`${serverOrigin}/*`]
+    });
+    if (!granted) {
+      showError('auth-error', 'Permission required to connect to your RSpace server. Please allow access when prompted.');
+      return;
+    }
+  } catch (error) {
+    logError('Permission request error:', error);
+    showError('auth-error', 'Could not request permission to access your server.');
+    return;
+  }
+
   // Show loading state
   elements.connectBtn.disabled = true;
   elements.connectBtn.textContent = 'Connecting...';
@@ -615,6 +633,18 @@ async function handlePdfClip() {
 
     const tab = tabs[0];
 
+    // Inject content script + PDF libraries into the active tab before requesting PDF generation
+    try {
+      await ensureContentScriptInjected(tab.id, true);
+    } catch (error) {
+      showScreen('clipper-screen');
+      showError('clip-error', 'Failed to access page. Try refreshing the page.');
+      logError('PDF content script injection error:', error);
+      elements.clipBtn.disabled = false;
+      elements.clipBtn.textContent = 'Save to RSpace';
+      return;
+    }
+
     // Send PDF clip request to background script
     const response = await sendMessageAsync({
       action: 'clipPdf',
@@ -871,28 +901,36 @@ function hideCreateHint() {
 }
 
 /**
- * Ensure content script is injected into the active tab
+ * Ensure content script (and optionally PDF libraries) are injected into the active tab.
+ * Scripts are only injected into the tab the user is actively clipping from,
+ * triggered by explicit user action — no broad host permissions required.
+ * @param {number} tabId
+ * @param {boolean} [includePdfLibs=false] - Also inject html2canvas and jsPDF
  */
-async function ensureContentScriptInjected(tabId) {
+async function ensureContentScriptInjected(tabId, includePdfLibs = false) {
   try {
     // Try to ping the content script to see if it's already there
     const response = await sendTabMessageAsync(tabId, { action: 'ping' });
     if (response) {
       log('Content script already injected');
-      return; // Content script already present
+      if (!includePdfLibs) return;
+      // PDF libs may not be loaded yet even if content.js is — fall through to inject them
     }
   } catch (error) {
     // Content script not present, need to inject it
     log('Content script not present, injecting...');
   }
-  
+
   try {
-    // Inject the content script
+    const files = includePdfLibs
+      ? ['html2canvas.min.js', 'jspdf.umd.min.js', 'content.js']
+      : ['content.js'];
+
     await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      files: ['content.js']
+      target: { tabId },
+      files
     });
-    log('Content script injected successfully');
+    log('Content script injected successfully', includePdfLibs ? '(with PDF libs)' : '');
   } catch (error) {
     logError('Failed to inject content script:', error);
     throw error;

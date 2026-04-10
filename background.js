@@ -661,10 +661,8 @@ async function generatePdfFromTab(tabId) {
     // Chrome extensions cannot directly use chrome.tabs.printToPDF
     // That API is only available to Chrome Apps (deprecated) and headless Chrome
     //
-    // Instead, we use html2canvas + jsPDF libraries via content script
-    // Libraries are bundled and loaded via manifest.json content_scripts
-
-    // Content script is already loaded via manifest.json, just send message
+    // Instead, we use html2canvas + jsPDF injected on demand by the popup
+    // before this message is sent, so they're available in the content script.
     log('Sending printPage message to content script...');
     const result = await chrome.tabs.sendMessage(tabId, { action: 'printPage' });
 

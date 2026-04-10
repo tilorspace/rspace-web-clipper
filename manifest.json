@@ -9,9 +9,10 @@
     "storage",
     "tabs"
   ],
-  "host_permissions": [
-    "http://*/*",
-    "https://*/*"
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -24,17 +25,6 @@
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": [
-        "html2canvas.min.js",
-        "jspdf.umd.min.js",
-        "content.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; base-uri 'self'; form-action 'none';"
   },

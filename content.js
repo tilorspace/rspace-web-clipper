@@ -39,7 +39,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'printPage') {
     log('Content script received printPage message');
 
-    // Libraries are already loaded via manifest.json, just generate PDF
     printPageToPdf().then(result => {
       log('Sending PDF result back to background script');
       sendResponse(result);
@@ -259,10 +258,10 @@ async function printPageToPdf() {
   try {
     // Libraries are now bundled, so they should be available immediately
     if (typeof html2canvas === 'undefined') {
-      throw new Error('html2canvas library not available. Make sure html2canvas.min.js is loaded before content.js in manifest.json');
+      throw new Error('html2canvas library not available');
     }
     if (typeof jspdf === 'undefined') {
-      throw new Error('jsPDF library not available. Make sure jspdf.umd.min.js is loaded before content.js in manifest.json');
+      throw new Error('jsPDF library not available');
     }
 
     log('Libraries confirmed available');
