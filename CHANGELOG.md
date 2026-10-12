@@ -45,6 +45,7 @@ Hardening release following a code and dependency review.
   link, and off screen on the connect screen).
 - The create hint wrapped into two columns; it reads as one sentence now.
 - Dark mode: inputs, selects and the note box use dark surfaces (text was light on light).
+- The note box is a fixed two rows instead of growing on focus.
 - The selected document is kept in view when the field selector appears; the empty state fits
   the space above the footer; tighter rhythm on the connect screen.
 

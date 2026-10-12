@@ -314,16 +314,16 @@ select:focus-visible {
   border-radius: var(--radius-small);
   font-size: 13px;
   font-family: 'Inter', sans-serif;
-  resize: vertical;
-  min-height: 32px;
-  transition: all 0.2s ease;
+  line-height: 1.4;
+  resize: none;       /* fixed two rows; longer notes scroll inside the box */
+  min-height: 0;
+  height: auto;
 }
 
 .note-group textarea:focus {
   outline: none;
   border-color: var(--interactive-color);
-  box-shadow: 0 0 0 3px var(--focus-ring);
-  min-height: 60px; /* Expands to 2-3 rows when focused */
+  box-shadow: 0 0 0 3px var(--rspace-blue-light);
 }
 
 
@@ -447,8 +447,6 @@ textarea::placeholder {
 }
 
 textarea {
-  min-height: 72px;
-  resize: vertical;
   font-family: 'Inter', sans-serif;
   line-height: 1.5;
 }
