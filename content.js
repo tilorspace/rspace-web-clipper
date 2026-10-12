@@ -1,4 +1,13 @@
 // Content script - runs on web pages to extract content
+//
+// This file is injected on demand via chrome.scripting.executeScript. All injected files share
+// one isolated world, so running it twice would redeclare the top-level constants (a SyntaxError)
+// and register a second message listener. The guard below makes a repeat injection a no-op.
+(function () {
+if (window.__rspaceClipperLoaded) {
+  return;
+}
+window.__rspaceClipperLoaded = true;
 
 // Security: Disable all logging in production
 const DEBUG = false;
@@ -8,12 +17,21 @@ const logError = DEBUG ? console.error : () => {};
 // Define valid content types for validation
 const VALID_CONTENT_TYPES = ['selection', 'full-page', 'url-only'];
 
+/**
+ * Whether the PDF libraries (injected separately by the popup) are present in this world.
+ * @returns {boolean}
+ */
+function pdfLibsLoaded() {
+  return typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   log('Content script received message:', request);
 
-  // Respond to ping to confirm content script is loaded
+  // Respond to ping to confirm content script is loaded, and report whether the
+  // PDF libraries are already available so the popup injects only what is missing.
   if (request.action === 'ping') {
-    sendResponse({ status: 'ready' });
+    sendResponse({ status: 'ready', pdfLibs: pdfLibsLoaded() });
     return true;
   }
 
@@ -257,12 +275,9 @@ async function printPageToPdf() {
   log('printPageToPdf: Starting PDF generation...');
 
   try {
-    // Libraries are now bundled, so they should be available immediately
-    if (typeof html2canvas === 'undefined') {
-      throw new Error('html2canvas library not available');
-    }
-    if (typeof jspdf === 'undefined') {
-      throw new Error('jsPDF library not available');
+    // The popup injects the libraries before sending printPage; verify they arrived
+    if (!pdfLibsLoaded()) {
+      throw new Error('PDF libraries not available');
     }
 
     log('Libraries confirmed available');
@@ -322,3 +337,4 @@ async function printPageToPdf() {
     };
   }
 }
+})();

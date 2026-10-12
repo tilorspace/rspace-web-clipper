@@ -893,29 +893,42 @@ function hideCreateHint() {
  * @param {boolean} [includePdfLibs=false] - Also inject html2canvas and jsPDF
  */
 async function ensureContentScriptInjected(tabId, includePdfLibs = false) {
+  let contentScriptPresent = false;
+  let pdfLibsPresent = false;
+
   try {
-    // Try to ping the content script to see if it's already there
+    // Ping the content script. It answers with whether the PDF libraries are loaded too.
     const response = await sendTabMessageAsync(tabId, { action: 'ping' });
-    if (response) {
-      log('Content script already injected');
-      if (!includePdfLibs) return;
-      // PDF libs may not be loaded yet even if content.js is — fall through to inject them
+    if (response && response.status === 'ready') {
+      contentScriptPresent = true;
+      pdfLibsPresent = response.pdfLibs === true;
+      log('Content script already injected, PDF libs present:', pdfLibsPresent);
     }
   } catch (error) {
-    // Content script not present, need to inject it
+    // No listener in the tab yet: the content script is not present
     log('Content script not present, injecting...');
   }
 
-  try {
-    const files = includePdfLibs
-      ? ['html2canvas.min.js', 'jspdf.umd.min.js', 'content.js']
-      : ['content.js'];
+  // Inject only what is missing. All injected files share one isolated world, so
+  // content.js is never injected twice (it also guards itself, see content.js header).
+  const files = [];
+  if (includePdfLibs && !pdfLibsPresent) {
+    files.push('html2canvas.min.js', 'jspdf.umd.min.js');
+  }
+  if (!contentScriptPresent) {
+    files.push('content.js');
+  }
 
+  if (files.length === 0) {
+    return;
+  }
+
+  try {
     await chrome.scripting.executeScript({
       target: { tabId },
       files
     });
-    log('Content script injected successfully', includePdfLibs ? '(with PDF libs)' : '');
+    log('Injected:', files.join(', '));
   } catch (error) {
     logError('Failed to inject content script:', error);
     throw error;
