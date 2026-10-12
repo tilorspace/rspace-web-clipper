@@ -26,6 +26,11 @@ const CONFIG = {
   // Cache Configuration
   CACHE: {
     DOCUMENTS_TTL_MS: 5 * 60 * 1000, // 5 minutes
+  },
+
+  // Persistent storage (chrome.storage.local)
+  STORAGE: {
+    API_KEY_EXPIRY_DAYS: 7, // how long an opted-in "remember API key" stays valid
   }
 };
 

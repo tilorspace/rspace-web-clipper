@@ -24,8 +24,8 @@ const ERROR_DISPLAY_MS = CONFIG.UI.ERROR_DISPLAY_MS;
 const SUCCESS_DISPLAY_MS = CONFIG.UI.SUCCESS_DISPLAY_MS;
 const SEARCH_DEBOUNCE_MS = CONFIG.UI.SEARCH_DEBOUNCE_MS;
 
-// NEW: API Key storage expiration (7 days)
-const API_KEY_EXPIRY_DAYS = 7;
+// API key storage expiration (see CONFIG.STORAGE)
+const API_KEY_EXPIRY_DAYS = CONFIG.STORAGE.API_KEY_EXPIRY_DAYS;
 const API_KEY_EXPIRY_MS = API_KEY_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -206,12 +206,18 @@ function setupEventListeners() {
 }
 
 /**
- * Setup protection for the https:// prefix in server URL input
+ * Keep a scheme on the server URL input.
+ *
+ * Defaults to https://, but http:// is left alone so the localhost and 127.0.0.1 URLs that
+ * handleConnect explicitly allows can be typed (handleConnect still rejects http:// for any
+ * other host). If the user clears the scheme entirely, https:// is put back in front of what
+ * they typed rather than wiping their input.
  */
 function setupServerUrlProtection() {
   const HTTPS_PREFIX = 'https://';
   const PREFIX_LENGTH = HTTPS_PREFIX.length;
-  
+  const SCHEME_RE = /^https?:\/\//i;
+
   // Set cursor position after https:// on focus
   elements.serverUrl.addEventListener('focus', (e) => {
     if (e.target.value === HTTPS_PREFIX) {
@@ -220,36 +226,17 @@ function setupServerUrlProtection() {
       }, 0);
     }
   });
-  
-  // Prevent deletion of https:// prefix
+
   elements.serverUrl.addEventListener('input', (e) => {
-    if (!e.target.value.startsWith(HTTPS_PREFIX)) {
-      e.target.value = HTTPS_PREFIX;
-      e.target.setSelectionRange(PREFIX_LENGTH, PREFIX_LENGTH);
-    }
-  });
-  
-  // Handle backspace and delete keys
-  elements.serverUrl.addEventListener('keydown', (e) => {
-    const cursorPos = e.target.selectionStart;
     const value = e.target.value;
-    
-    // Prevent deleting any part of https://
-    if ((e.key === 'Backspace' && cursorPos <= PREFIX_LENGTH) || 
-        (e.key === 'Delete' && cursorPos < PREFIX_LENGTH)) {
-      e.preventDefault();
+    if (SCHEME_RE.test(value)) {
+      return;
     }
-    
-    // Prevent selecting and deleting https://
-    if ((e.key === 'Backspace' || e.key === 'Delete') && 
-        e.target.selectionStart < PREFIX_LENGTH && e.target.selectionEnd > PREFIX_LENGTH) {
-      e.preventDefault();
-      // If user tried to delete selection including prefix, just delete the part after
-      if (e.target.selectionEnd > PREFIX_LENGTH) {
-        e.target.value = HTTPS_PREFIX + value.substring(e.target.selectionEnd);
-        e.target.setSelectionRange(PREFIX_LENGTH, PREFIX_LENGTH);
-      }
-    }
+    // Scheme was deleted (or a bare host was pasted): prepend https:// and keep the rest
+    const rest = value.replace(/^[a-z]*:?\/*/i, '');
+    e.target.value = HTTPS_PREFIX + rest;
+    const end = e.target.value.length;
+    e.target.setSelectionRange(end, end);
   });
 }
 
@@ -376,21 +363,10 @@ async function handleConnect() {
       log('Server URL not saved (checkbox unchecked)');
     }
     
-    // Save API key with expiration if checkbox is checked
-    if (rememberApiKey) {
-      const expiresAt = Date.now() + API_KEY_EXPIRY_MS;
-      await chrome.storage.local.set({
-        savedApiKey: apiKey,
-        apiKeyExpiresAt: expiresAt,
-        rememberApiKey: true
-      });
-      log('API key saved persistently (expires in', API_KEY_EXPIRY_DAYS, 'days)');
-    } else {
-      // Clear any previously saved API key
-      await chrome.storage.local.remove(['savedApiKey', 'apiKeyExpiresAt', 'rememberApiKey']);
-      log('API key not saved (checkbox unchecked or default)');
-    }
-    
+    // Forget any previously saved key up front. A new key is only persisted below,
+    // after the server has accepted it, so a mistyped key is never stored.
+    await chrome.storage.local.remove(['savedApiKey', 'apiKeyExpiresAt', 'rememberApiKey']);
+
     // Use promisified message sending
     const response = await sendMessageAsync({ 
       action: 'startAuth', 
@@ -399,6 +375,15 @@ async function handleConnect() {
     });
     
     if (response && response.success) {
+      if (rememberApiKey) {
+        const expiresAt = Date.now() + API_KEY_EXPIRY_MS;
+        await chrome.storage.local.set({
+          savedApiKey: apiKey,
+          apiKeyExpiresAt: expiresAt,
+          rememberApiKey: true
+        });
+        log('API key saved persistently (expires in', API_KEY_EXPIRY_DAYS, 'days)');
+      }
       showScreen('clipper-screen');
       await loadDocuments();
     } else {
@@ -1330,13 +1315,11 @@ async function handleClearSavedData() {
     
     // Also clear active session (logout)
     await chrome.storage.session.clear();
-    
-    // Tell background script to clear session
-    try {
-      await sendMessageAsync({ action: 'logout' });
-    } catch (error) {
-      // Background script might not have logout handler yet, that's ok
-      log('Background logout call failed (may not be implemented):', error.message);
+
+    // Tell the background worker to drop its in-memory document cache
+    const response = await sendMessageAsync({ action: 'logout' });
+    if (!response || !response.success) {
+      throw new Error('Background worker did not confirm logout');
     }
     
     // Clear form fields

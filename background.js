@@ -123,7 +123,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     getDocumentFields(request.documentId).then(sendResponse);
     return true;
   }
+
+  if (request.action === 'logout') {
+    handleLogout().then(sendResponse);
+    return true;
+  }
 });
+
+/**
+ * Clear everything the worker holds for the current user: session credentials,
+ * the in-memory document cache and any in-flight request promises.
+ */
+async function handleLogout() {
+  try {
+    await chrome.storage.session.clear();
+    documentsCache = {
+      data: null,
+      timestamp: null,
+      ttl: 5 * 60 * 1000,
+      totalPages: null,
+      pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
+    };
+    activeRequests.clear();
+    log('Logged out, cache cleared');
+    return { success: true };
+  } catch (error) {
+    logError('Logout error:', error);
+    return { success: false, error: 'Failed to log out' };
+  }
+}
 
 async function handleAuth(serverUrl, apiKey) {
   log('handleAuth called with URL:', serverUrl);

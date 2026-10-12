@@ -193,14 +193,31 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
 
     // Connect
     await popup.waitForSelector('#auth-screen', { state: 'visible' });
-    // The URL input re-applies an https:// prefix on every input event, so an http://localhost
-    // URL cannot be typed through the UI (see findings); set the value directly instead.
-    await popup.$eval('#server-url', (el, url) => { el.value = url; }, RSPACE_URL);
+    const localStore = (keys) => popup.evaluate((k) => chrome.storage.local.get(k), keys);
+
+    // URL input: deleting the scheme must prepend https:// rather than wipe the input
+    await popup.fill('#server-url', 'example.org');
+    record('url input restores https:// in front of a bare host', (await popup.inputValue('#server-url')) === 'https://example.org');
+
+    // Wrong key with "remember" checked must not be persisted
+    await popup.fill('#server-url', RSPACE_URL);
+    record('url input accepts http://localhost', (await popup.inputValue('#server-url')) === RSPACE_URL);
+    await popup.check('#remember-api-key');
+    await popup.fill('#api-key', 'not-a-valid-key');
+    await popup.click('#connect-btn');
+    await popup.waitForSelector('#auth-error.show', { timeout: 20000 });
+    let stored = await localStore(['savedApiKey', 'apiKeyExpiresAt']);
+    record('invalid API key is not persisted', !stored.savedApiKey && !stored.apiKeyExpiresAt);
+
+    // Correct key with "remember" checked is persisted with an expiry
     await popup.fill('#api-key', API_KEY);
     await popup.click('#connect-btn');
     try {
       await popup.waitForSelector('#clipper-screen', { state: 'visible', timeout: 20000 });
       record('connect to RSpace', true);
+      stored = await localStore(['savedApiKey', 'apiKeyExpiresAt', 'savedServerUrl']);
+      record('valid API key persisted with future expiry', stored.savedApiKey === API_KEY && stored.apiKeyExpiresAt > Date.now());
+      record('server url persisted', stored.savedServerUrl === RSPACE_URL);
     } catch (e) {
       const err = await popup.locator('#auth-error').textContent();
       await popup.screenshot({ path: path.join(artifacts, 'popup-connect-failed.png') });
@@ -229,6 +246,24 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     // 5. Full page
     s = await clip(popup, { type: 'full-page', note: NOTES.fullPage });
     record('5 full-page clip', s.ok, s.text);
+
+    // Logout via Settings > Clear Saved Data must wipe local storage, session and the worker cache
+    // The popup reloads the document list after a clip; wait for that to repopulate the cache
+    let cached = false;
+    for (let i = 0; i < 50 && !cached; i++) {
+      cached = await sw.evaluate(() => Array.isArray(documentsCache.data));
+      if (!cached) await popup.waitForTimeout(100);
+    }
+    record('worker cache populated after clipping', cached);
+    await popup.click('#settings-btn');
+    await popup.click('#clear-data-btn');
+    await popup.waitForTimeout(500);
+    stored = await localStore(['savedApiKey', 'apiKeyExpiresAt', 'savedServerUrl', 'rememberApiKey']);
+    const session = await popup.evaluate(() => chrome.storage.session.get(['serverUrl', 'accessToken']));
+    record('clear saved data removes persisted credentials', Object.keys(stored).length === 0, JSON.stringify(Object.keys(stored)));
+    record('clear saved data clears session', !session.serverUrl && !session.accessToken);
+    record('clear saved data clears worker cache', await sw.evaluate(() => documentsCache.data === null && activeRequests.size === 0));
+    await popup.screenshot({ path: path.join(artifacts, 'popup-after-clear.png') });
 
     // WP3 regression: re-injecting content.js must not throw in the page
     const redeclared = consoleLog.filter((l) => /already been declared/.test(l));
