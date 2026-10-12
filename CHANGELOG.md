@@ -40,6 +40,14 @@ Hardening release following a code and dependency review.
 - If the popup is closed while a clip is saving, the result is shown on the next open.
 - Full Page mode also strips `<aside>` elements.
 
+### Visual
+- Error and success banners sit directly under the Save button (they were below the Settings
+  link, and off screen on the connect screen).
+- The create hint wrapped into two columns; it reads as one sentence now.
+- Dark mode: inputs, selects and the note box use dark surfaces (text was light on light).
+- The selected document is kept in view when the field selector appears; the empty state fits
+  the space above the footer; tighter rhythm on the connect screen.
+
 ### Internals
 - Popup: one `setSelectedDocument()` owns the selection state; the two clip handlers merged
   into `handleSave()`; the URL prefix protection, the one-time migration and the document cache

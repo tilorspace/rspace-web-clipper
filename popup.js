@@ -474,7 +474,11 @@ async function setSelectedDocument(doc, fields) {
   currentDocFields = null;
   hideFieldSelector();
 
-  document.querySelectorAll('.document-item').forEach((item) => markSelected(item, !!doc && Number(item.dataset.id) === doc.id));
+  document.querySelectorAll('.document-item').forEach((item) => {
+    const on = !!doc && Number(item.dataset.id) === doc.id;
+    markSelected(item, on);
+    if (on) item.scrollIntoView({ block: 'nearest' });
+  });
   if (!doc) return;
 
   if (elements.documentSearch.value.trim().toLowerCase() !== doc.name.toLowerCase()) {
@@ -493,6 +497,9 @@ async function setSelectedDocument(doc, fields) {
     if (fields.length > 1) {
       currentDocFields = fields;
       updateFieldSelector();
+      // The footer just grew; keep the selected item in view
+      const item = elements.documentList.querySelector('.document-item.selected');
+      if (item) item.scrollIntoView({ block: 'nearest' });
     }
   } catch (error) {
     if (!(error instanceof SessionExpired)) logError('Error fetching document fields:', error);
@@ -585,7 +592,7 @@ function hideBanners() {
 function showError(elementId, message) {
   const el = document.getElementById(elementId);
   showBanner(el, message, CONFIG.UI.ERROR_DISPLAY_MS);
-  setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+  setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
 }
 
 function showSuccessWithLink(message, globalId) {

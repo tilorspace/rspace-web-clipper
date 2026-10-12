@@ -104,7 +104,8 @@ npx playwright install chromium
 node --env-file=/path/to/.env scripts/e2e/run.js   # .env defines RSPACE_URL and RSPACE_API_KEY
 ```
 
-`scripts/e2e/explore.js` is a longer exploratory session (Form documents, hostile input, real
+`scripts/e2e/screenshots.js` captures every popup state in light and dark mode under
+`web-ext-artifacts/screenshots/` for visual review. `scripts/e2e/explore.js` is a longer exploratory session (Form documents, hostile input, real
 external pages, expired sessions, unreachable server); `EXPLORE_ONLY=AB` limits it to the listed
 scenario letters. Both scripts share `scripts/e2e/lib.js`.
 

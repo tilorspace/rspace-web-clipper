@@ -18,6 +18,7 @@
     "audit": "npm audit --omit=dev --audit-level=high",
     "e2e": "node scripts/e2e/run.js",
     "e2e:explore": "node scripts/e2e/explore.js",
+    "e2e:screenshots": "node scripts/e2e/screenshots.js",
     "unit": "node scripts/test-background.js && node scripts/test-content-script.js",
     "test": "npm run check-libs && npm run check-manifest && npm run unit && npm run audit"
   },

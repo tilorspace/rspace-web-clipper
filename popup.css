@@ -62,6 +62,11 @@
     --text-primary: hsl(200 15% 90%);
     --text-secondary: hsl(203 10% 70%);
     --border-color: hsl(200 15% 25%);
+    --lighter-interactive-color: hsl(200 12% 20%);
+    --disabled-color: hsl(200 8% 22%);
+    --accent-bg-contrast-text: hsl(203 10% 70%);
+    --error-bg: hsl(0 40% 14%);
+    --success-bg: hsl(160 40% 12%);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.4);
   }
@@ -112,7 +117,7 @@ body {
   display: block;
   width: 100%;
   text-align: center;
-  margin-top: 12px;
+  margin-top: 4px;
   padding: 8px;
   background: none;
   border: none;
@@ -239,12 +244,12 @@ body {
 }
 
 .document-section::-webkit-scrollbar-thumb {
-  background: #d0d0d0;
+  background: var(--border-color);
   border-radius: var(--radius-small);
 }
 
 .document-section::-webkit-scrollbar-thumb:hover {
-  background: #b0b0b0;
+  background: var(--interactive-color);
 }
 
 /* Field selector (shown for Form-based documents) */
@@ -321,19 +326,12 @@ select:focus-visible {
   min-height: 60px; /* Expands to 2-3 rows when focused */
 }
 
-/* Button container within sticky footer */
-.button-container {
-  /* No border-top needed - already in sticky-footer */
-}
-  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.04);
-}
 
 /* Auth Screen */
 #auth-screen {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 12px 0 12px 0; /* Minimal padding - .auth-content handles spacing */
   overflow-y: auto;
 }
 
@@ -342,17 +340,17 @@ select:focus-visible {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start; /* Changed from center - content starts at top */
-  padding: 20px 16px 16px 16px; /* Added horizontal padding so content doesn't touch edges */
+  justify-content: flex-start;
+  padding: 20px 20px 12px 20px;
 }
 
 /* Auth links container (Option 3 layout) */
 .auth-links {
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 16px;
   align-items: center;
-  margin-top: 12px;
-  padding: 0 4px;
+  margin-top: 4px;
 }
 
 /* Text link button style */
@@ -390,7 +388,7 @@ select:focus-visible {
 #auth-screen .subtitle {
   text-align: center;
   color: var(--text-secondary);
-  margin: 0 0 28px 0;
+  margin: 0 0 20px 0;
   font-size: 13px;
   line-height: 1.5;
 }
@@ -464,8 +462,8 @@ textarea {
 
 /* Empty State */
 .empty-state {
-  margin-top: 8px;
-  padding: 24px 16px;
+  margin-top: 0;
+  padding: 16px;
   background: var(--lighter-interactive-color);
   border-radius: var(--radius);
   text-align: center;
@@ -473,22 +471,16 @@ textarea {
 }
 
 .empty-state-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
+  font-size: 28px;
+  margin-bottom: 6px;
   display: block;
-  animation: gentleBounce 2s ease-in-out infinite;
-}
-
-@keyframes gentleBounce {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
 }
 
 .empty-state h3 {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  margin: 0 0 8px 0;
+  margin: 0 0 4px 0;
 }
 
 .empty-state p {
@@ -516,14 +508,21 @@ textarea {
   border-radius: var(--radius);
   font-size: 12px;
   font-weight: 500;
+  line-height: 1.4;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
+  overflow-wrap: anywhere;
 }
 
 .create-hint::before {
   content: "✨";
   font-size: 14px;
+  flex-shrink: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .create-hint { color: var(--interactive-color); }
 }
 
 /* Radio Group Styling */
@@ -755,8 +754,7 @@ button {
 
 /* Messages */
 .error {
-  margin-top: 10px;
-  margin-bottom: 20px; /* Add bottom margin for scroll space */
+  margin: 10px 0 0 0;
   padding: 10px 12px;
   background: var(--error-bg);
   color: var(--error);
@@ -765,7 +763,10 @@ button {
   font-size: 13px;
   display: none;
   line-height: 1.4;
-  scroll-margin-bottom: 20px; /* Ensure full visibility when scrolled into view */
+}
+
+#auth-error {
+  margin: 0 0 12px 0;
 }
 
 .error.show {
@@ -896,20 +897,11 @@ input[type="checkbox"]:focus-visible {
   outline-offset: 2px;
 }
 
-/* Accessibility */
-@media (prefers-reduced-motion: reduce) {
-  * {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-  }
-}
-
 /* Remember Options Styling */
 .remember-options {
-  margin: 16px 0 20px 0; /* Added 20px bottom margin for space before buttons */
+  margin: 12px 0 12px 0;
   padding: 12px;
-  background: var(--background-color);
+  background: var(--background-secondary);
   border-radius: 8px;
   border: 1px solid var(--border-color);
 }
@@ -936,7 +928,7 @@ input[type="checkbox"]:focus-visible {
 
 .checkbox-label span {
   font-size: 14px;
-  color: var(--text-color);
+  color: var(--text-primary);
 }
 
 .warning-text {

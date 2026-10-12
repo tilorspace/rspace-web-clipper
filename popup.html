@@ -37,14 +37,14 @@
           <p class="warning-text">⚠️ Only enable on trusted, private devices</p>
         </div>
         
+        <div id="auth-error" class="error"></div>
+
         <button id="connect-btn" class="btn-primary">Connect to RSpace</button>
-        
+
         <div class="auth-links">
           <button id="back-btn" class="btn-link" style="display:none;">← Back to Clipper</button>
           <button id="clear-data-btn" class="btn-link">🗑️ Clear Saved Data</button>
         </div>
-        
-        <div id="auth-error" class="error"></div>
       </div>
     </div>
 
@@ -88,7 +88,7 @@
           </div>
           
           <div id="create-hint" class="create-hint" style="display:none;">
-            No matching document. Click Save to create "<span id="create-hint-name"></span>".
+            <span>No matching document. Click Save to create “<b id="create-hint-name"></b>”.</span>
           </div>
         </div>
       </div>
@@ -128,9 +128,9 @@
         
         <div class="button-container">
           <button id="clip-btn" class="btn-primary">Save to RSpace</button>
-          <button id="settings-btn" class="settings-link">⚙️ Settings</button>
           <div id="clip-error" class="error"></div>
           <div id="clip-success" class="success"></div>
+          <button id="settings-btn" class="settings-link">⚙️ Settings</button>
         </div>
       </div>
     </div>
