@@ -17,7 +17,8 @@
     "check-manifest": "node scripts/check-manifest.js",
     "audit": "npm audit --omit=dev --audit-level=high",
     "e2e": "node scripts/e2e/run.js",
-    "unit": "node scripts/test-background.js",
+    "e2e:explore": "node scripts/e2e/explore.js",
+    "unit": "node scripts/test-background.js && node scripts/test-content-script.js",
     "test": "npm run check-libs && npm run check-manifest && npm run unit && npm run audit"
   },
   "dependencies": {

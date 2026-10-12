@@ -14,9 +14,6 @@ const DEBUG = false;
 const log = DEBUG ? console.log : () => {};
 const logError = DEBUG ? console.error : () => {};
 
-// Define valid content types for validation
-const VALID_CONTENT_TYPES = ['selection', 'full-page', 'url-only'];
-
 /**
  * Whether the PDF libraries (injected separately by the popup) are present in this world.
  * @returns {boolean}
@@ -37,13 +34,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'getContent') {
     try {
-      // Validate contentType before processing
-      if (!request.contentType || !VALID_CONTENT_TYPES.includes(request.contentType)) {
-        logError('Invalid content type:', request.contentType);
-        sendResponse(null);
-        return true;
-      }
-
       const content = extractContent(request.contentType);
       log('Extracted content:', content);
       sendResponse(content);
@@ -85,8 +75,8 @@ function extractContent(contentType) {
     case 'url-only':
       return getUrlOnly();
     default:
-      // Fallback to selection (should not reach here due to validation)
-      return getSelectedContent();
+      logError('Invalid content type:', contentType);
+      return null;
   }
 }
 
@@ -276,7 +266,7 @@ const PDF_CONFIG = {
  * whole document into a single canvas (the previous approach) hit the browser's canvas size
  * limit on long pages, which produced blank pages, and held the entire page bitmap in memory.
  *
- * @returns {Promise<{success: boolean, pdfData?: string, pages?: number, error?: string}>}
+ * @returns {Promise<{success: boolean, pdfData?: string, error?: string}>}
  */
 async function printPageToPdf() {
   log('printPageToPdf: Starting PDF generation...');
@@ -349,11 +339,7 @@ async function printPageToPdf() {
     const pdfData = pdf.output('dataurlstring');
     log(`PDF generated successfully, ${pageCount} pages, size: ${Math.round(pdfData.length / 1024)} KB`);
 
-    return {
-      pdfData: pdfData,
-      pages: pageCount,
-      success: true
-    };
+    return { success: true, pdfData };
 
   } catch (error) {
     console.error('PDF generation failed:', error);

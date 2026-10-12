@@ -91,10 +91,9 @@ npm ci                 # install pinned dependencies (Node 20 or newer)
 npm run check-libs     # verify the committed bundles match the installed package versions
 npm run copy-libs      # refresh the committed bundles after bumping a version in package.json
 npm run check-manifest # validate manifest.json, referenced files, permissions, and script syntax
-npm run unit           # background worker unit tests (Node, no browser)
+npm run unit           # worker and content script unit tests (Node, no browser)
 npm run audit          # fail on high or critical advisories in the shipped libraries
 npm test               # all of the above
-node scripts/test-content-script.js   # content script injection tests
 ```
 
 End-to-end test against a running RSpace (loads the extension into Chromium via Playwright, clips
@@ -104,6 +103,10 @@ a local test page in every mode, and verifies the result through the RSpace API)
 npx playwright install chromium
 node --env-file=/path/to/.env scripts/e2e/run.js   # .env defines RSPACE_URL and RSPACE_API_KEY
 ```
+
+`scripts/e2e/explore.js` is a longer exploratory session (Form documents, hostile input, real
+external pages, expired sessions, unreachable server); `EXPLORE_ONLY=AB` limits it to the listed
+scenario letters. Both scripts share `scripts/e2e/lib.js`.
 
 Set `HEADED=1` to watch the browser and `E2E_KEEP=1` to keep the test documents. Screenshots,
 the stored document HTML and the uploaded PDFs land in `web-ext-artifacts/e2e/`. The harness
@@ -124,7 +127,7 @@ Layout:
 | `content.js` | Injected into the page on demand: content extraction, HTML sanitizing, PDF rendering |
 | `popup.html`, `popup.js`, `popup.css` | The toolbar popup |
 | `config.js` | Shared constants (timeouts, limits, cache TTL) |
-| `scripts/` | Tooling, unit tests and the e2e harness |
+| `scripts/` | Tooling, unit tests and the e2e scripts |
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 

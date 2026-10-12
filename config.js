@@ -1,32 +1,29 @@
-// Configuration constants for RSpace Web Clipper
-// This file is loaded before other scripts via manifest.json
+// Configuration constants for RSpace Web Clipper.
+// Loaded by popup.html before popup.js and imported by background.js (importScripts).
+// content.js is injected on its own and carries its own copy of the logging switch.
+
+// Logging is off in release builds; flip DEBUG to trace in the worker and popup consoles.
+const DEBUG = false;
+const log = DEBUG ? console.log : () => {};
+const logError = DEBUG ? console.error : () => {};
 
 const CONFIG = {
-  // API Configuration
   API: {
     DEFAULT_PAGE_SIZE: 50,
-    MAX_DOCUMENTS_DISPLAY: 5,
     REQUEST_TIMEOUT_MS: 30000, // 30 seconds for JSON API calls
     UPLOAD_TIMEOUT_MS: 120000, // 2 minutes for the PDF file upload
   },
-  
-  // UI Configuration
+
   UI: {
-    ERROR_DISPLAY_MS: 5000,   // 5 seconds
-    SUCCESS_DISPLAY_MS: 3000, // 3 seconds
-    SEARCH_DEBOUNCE_MS: 300,  // 300ms
+    ERROR_DISPLAY_MS: 5000,
+    SUCCESS_DISPLAY_MS: 3000,
+    SEARCH_DEBOUNCE_MS: 300,
   },
-  
-  // Input Validation Limits
+
   LIMITS: {
     MAX_DOC_TITLE_LENGTH: 255,
     MAX_NOTE_LENGTH: 10000,
     MAX_SERVER_URL_LENGTH: 500,
-  },
-  
-  // Cache Configuration
-  CACHE: {
-    DOCUMENTS_TTL_MS: 5 * 60 * 1000, // 5 minutes
   },
 
   // Persistent storage (chrome.storage.local)

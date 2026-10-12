@@ -23,12 +23,28 @@ Hardening release following a code and dependency review.
 - Clear Saved Data now also clears the worker's in-memory document cache.
 - Clipped tables keep `colspan` and `rowspan`; images keep their size attributes.
 
+### Fixed (found by exploratory testing)
+- Saving twice into a newly created document created a second document with the same name.
+  The created document now stays selected.
+- Typing the exact name of a Form document did not offer the field choice, so saving failed
+  with "select a field" and no selector on screen.
+- A name differing only in case from an existing document created a duplicate.
+- A revoked or expired API key showed the server's raw error and left the popup on the clipper
+  screen; it now returns to the connect screen.
+- The popup ignored input until the document list had loaded.
+
 ### Changed
 - Document search also queries the server when the local list has few matches, so documents
   outside the loaded pages can be found.
 - Enter in the search box selects the matching document; only the Save button clips.
 - If the popup is closed while a clip is saving, the result is shown on the next open.
 - Full Page mode also strips `<aside>` elements.
+
+### Internals
+- Popup: one `setSelectedDocument()` owns the selection state; the two clip handlers merged
+  into `handleSave()`; the URL prefix protection, the one-time migration and the document cache
+  were removed. Worker: shared `appendToField()` for HTML and PDF clips, one error mapping for
+  all messages, 401 handled in one place. About 1400 lines removed.
 
 ### Development
 - `package.json` pins the bundled libraries; `npm test` runs bundle, manifest, unit and audit checks.
