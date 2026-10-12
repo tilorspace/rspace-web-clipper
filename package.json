@@ -1,0 +1,25 @@
+{
+  "name": "rspace-web-clipper",
+  "version": "0.1.0",
+  "description": "Save web content directly into your RSpace documents",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rspace-os/rspace-web-clipper.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "copy-libs": "node scripts/copy-libs.js",
+    "check-libs": "node scripts/copy-libs.js --check",
+    "check-manifest": "node scripts/check-manifest.js",
+    "audit": "npm audit --omit=dev --audit-level=high",
+    "test": "npm run check-libs && npm run check-manifest && npm run audit"
+  },
+  "dependencies": {
+    "html2canvas": "1.4.1",
+    "jspdf": "2.5.1"
+  }
+}

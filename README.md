@@ -49,6 +49,26 @@ Save web content from Chromium based browsers directly to your RSpace documents 
 That's it! ✨
 
 ---
+### Development
+
+The extension is plain JavaScript with no build step. Two third-party browser bundles ship in the
+repository root (`jspdf.umd.min.js` and `html2canvas.min.js`). Their versions are pinned in
+`package.json` so that `npm audit` and Dependabot can track them.
+
+```bash
+npm ci                # install pinned dependencies (Node 20 or newer)
+npm run check-libs    # verify the committed bundles match the installed package versions
+npm run copy-libs     # refresh the committed bundles after bumping a version in package.json
+npm run check-manifest # validate manifest.json, referenced files, permissions, and script syntax
+npm run audit         # fail on high or critical advisories in the shipped libraries
+npm test              # all of the above
+```
+
+To upgrade a library: change the version in `package.json`, run `npm install`, then
+`npm run copy-libs`, and commit both the lockfile and the refreshed bundle. CI runs the same checks
+on every pull request.
+
+---
 ### Need Help?
 
 - Report any problems you encounter or any functionality you're missing [via the issue tracker](https://github.com/rspace-os/rspace-web-clipper/issues/new/choose) on this repository.
