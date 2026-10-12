@@ -83,6 +83,7 @@ async function checkAuthStatus() {
     if (session.accessToken && session.serverUrl) {
       // User is authenticated - show clipper screen
       showScreen('clipper-screen');
+      await showPendingClipResult(session.serverUrl);
       await loadDocuments();
     } else {
       // Not authenticated - prepare auth screen
@@ -196,11 +197,21 @@ function setupEventListeners() {
     elements.fieldSelect.addEventListener('change', handleFieldSelectChange);
   }
   
-  // Support Enter key in document search
+  // Enter in the search box selects the matching document; only the Save button clips
   elements.documentSearch.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      handleClip();
+      clearTimeout(searchTimeout);
+      const query = elements.documentSearch.value.toLowerCase().trim();
+      if (!query) return;
+      const exact = documents.find(doc => doc.name.toLowerCase() === query);
+      const partial = documents.filter(doc => doc.name.toLowerCase().includes(query));
+      const match = exact || (partial.length === 1 ? partial[0] : null);
+      if (match) {
+        selectDocument(match);
+      } else {
+        showCreateHint();
+      }
     }
   });
 }
@@ -516,6 +527,7 @@ async function handleClip() {
     });
     
     showScreen('clipper-screen');
+    await chrome.storage.session.remove('lastClipResult');
     
     if (response && response.success) {
       // Get server URL for link
@@ -642,6 +654,7 @@ async function handlePdfClip() {
     });
 
     showScreen('clipper-screen');
+    await chrome.storage.session.remove('lastClipResult');
 
     if (response && response.success) {
       // Get server URL for link
@@ -700,7 +713,7 @@ async function loadDocuments(append = false) {
     
     if (response && response.success) {
       if (append) {
-        documents = [...documents, ...response.documents];
+        documents = mergeDocuments(documents, response.documents);
       } else {
         documents = response.documents;
       }
@@ -775,6 +788,40 @@ function handleInfiniteScroll() {
 }
 
 
+// Incremented per search so a slow server response for an older query is ignored
+let searchSequence = 0;
+
+/**
+ * Merge two document lists, keeping the first occurrence of each id.
+ */
+function mergeDocuments(existing, incoming) {
+  const seen = new Set(existing.map(doc => doc.id));
+  return [...existing, ...incoming.filter(doc => !seen.has(doc.id))];
+}
+
+/**
+ * Apply the current search box value to the list: filter the documents loaded so far,
+ * select an exact name match, and toggle the create hint.
+ */
+function applySearchFilter(query) {
+  const filtered = documents.filter(doc =>
+    doc.name.toLowerCase().includes(query)
+  );
+  const exactMatch = documents.find(doc =>
+    doc.name.toLowerCase() === query
+  );
+
+  selectedDocument = exactMatch || null;
+  renderDocuments(filtered);
+
+  if (!exactMatch) {
+    showCreateHint();
+  } else {
+    hideCreateHint();
+  }
+  return { filtered, exactMatch };
+}
+
 function handleDocumentSearch() {
   // Clear field state immediately — it's only restored by clicking a document
   currentDocFields = null;
@@ -783,8 +830,9 @@ function handleDocumentSearch() {
 
   // Debounce the rest
   clearTimeout(searchTimeout);
-  searchTimeout = setTimeout(() => {
+  searchTimeout = setTimeout(async () => {
     const query = elements.documentSearch.value.toLowerCase().trim();
+    const sequence = ++searchSequence;
 
     if (!query) {
       // Show all documents when search is empty
@@ -794,30 +842,71 @@ function handleDocumentSearch() {
       return;
     }
 
-    const filtered = documents.filter(doc =>
-      doc.name.toLowerCase().includes(query)
-    );
+    const { filtered, exactMatch } = applySearchFilter(query);
 
-    // Check if there's an exact match
-    const exactMatch = documents.find(doc =>
-      doc.name.toLowerCase() === query
-    );
-
-    if (exactMatch) {
-      selectedDocument = exactMatch;
-    } else {
-      selectedDocument = null;
+    // Only the pages scrolled so far are loaded locally. When the local match is thin and
+    // the server has more documents, ask the server to search the rest.
+    if (query.length < 2 || !hasMoreDocuments || (exactMatch && filtered.length >= 5)) {
+      return;
     }
 
-    renderDocuments(filtered);
-
-    // Show create hint if no exact match found and query is not empty
-    if (!exactMatch && query) {
-      showCreateHint();
-    } else {
-      hideCreateHint();
+    try {
+      const response = await sendMessageAsync({ action: 'getDocuments', pageNumber: 0, query });
+      // Discard if the user has typed something else since
+      if (sequence !== searchSequence) return;
+      if (response && response.success && response.documents.length) {
+        documents = mergeDocuments(documents, response.documents);
+        applySearchFilter(query);
+      }
+    } catch (error) {
+      logError('Server search failed:', error);
     }
   }, SEARCH_DEBOUNCE_MS);
+}
+
+/**
+ * Show the outcome of a clip that finished after the popup was closed (stored by the worker).
+ * Shown once; the entry is removed afterwards.
+ */
+async function showPendingClipResult(serverUrl) {
+  try {
+    const { lastClipResult } = await chrome.storage.session.get('lastClipResult');
+    if (!lastClipResult) return;
+    await chrome.storage.session.remove('lastClipResult');
+
+    // Ignore stale entries (older than ten minutes)
+    if (Date.now() - lastClipResult.at > 10 * 60 * 1000) return;
+
+    if (lastClipResult.success) {
+      showSuccessWithLink('clip-success', lastClipResult.message, lastClipResult.documentId, lastClipResult.globalId, serverUrl);
+    } else {
+      showError('clip-error', lastClipResult.message);
+    }
+  } catch (error) {
+    logError('Could not read pending clip result:', error);
+  }
+}
+
+/**
+ * Select a document in the list: highlight it, put its name in the search box and
+ * load its fields (to show the field selector for Form documents).
+ */
+async function selectDocument(doc) {
+  document.querySelectorAll('.document-item').forEach(i => {
+    const isTarget = Number(i.dataset.id) === doc.id;
+    i.classList.toggle('selected', isTarget);
+    i.setAttribute('aria-selected', String(isTarget));
+  });
+  selectedDocument = doc;
+  elements.documentSearch.value = doc.name;
+  updateSearchClearButton();
+  hideCreateHint();
+
+  // Reset field state, then fetch fields for this document
+  currentDocFields = null;
+  selectedField = null;
+  hideFieldSelector();
+  await fetchAndShowFieldSelector(doc.id);
 }
 
 function renderDocuments(docs) {
@@ -844,32 +933,14 @@ function renderDocuments(docs) {
       item.setAttribute('aria-selected', 'false');
     }
     
-    const selectDocument = async () => {
-      document.querySelectorAll('.document-item').forEach(i => {
-        i.classList.remove('selected');
-        i.setAttribute('aria-selected', 'false');
-      });
-      item.classList.add('selected');
-      item.setAttribute('aria-selected', 'true');
-      selectedDocument = doc;
-      elements.documentSearch.value = doc.name;
-      hideCreateHint();
-
-      // Reset field state, then fetch fields for this document
-      currentDocFields = null;
-      selectedField = null;
-      hideFieldSelector();
-      await fetchAndShowFieldSelector(doc.id);
-    };
-    
     // Click handler
-    item.addEventListener('click', selectDocument);
+    item.addEventListener('click', () => selectDocument(doc));
     
     // Keyboard handler (Enter or Space)
     item.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        selectDocument();
+        selectDocument(doc);
       }
     });
     
@@ -878,6 +949,8 @@ function renderDocuments(docs) {
 }
 
 function showCreateHint() {
+  const nameEl = document.getElementById('create-hint-name');
+  if (nameEl) nameEl.textContent = elements.documentSearch.value.trim();
   elements.createHint.style.display = 'flex';
 }
 

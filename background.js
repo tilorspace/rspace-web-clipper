@@ -151,7 +151,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'getDocuments') {
-    getDocuments(request.pageNumber || 0).then(sendResponse);
+    getDocuments(request.pageNumber || 0, request.query || '').then(sendResponse);
     return true;
   }
 
@@ -239,10 +239,16 @@ async function handleAuth(serverUrl, apiKey) {
   }
 }
 
-async function getDocuments(pageNumber = 0) {
-  log('getDocuments called for page:', pageNumber);
-  
-  const cacheKey = `documents_${pageNumber}`;
+/**
+ * List the user's documents, newest first.
+ * @param {number} pageNumber
+ * @param {string} [query] - optional server-side search term; results are not cached
+ */
+async function getDocuments(pageNumber = 0, query = '') {
+  log('getDocuments called for page:', pageNumber, 'query:', query);
+
+  query = typeof query === 'string' ? query.trim().slice(0, 200) : '';
+  const cacheKey = query ? `search_${pageNumber}_${query}` : `documents_${pageNumber}`;
   
   // Request deduplication
   if (activeRequests.has(cacheKey)) {
@@ -259,8 +265,8 @@ async function getDocuments(pageNumber = 0) {
         return { success: false, error: 'Not authenticated', documents: [], hasMore: false };
       }
       
-      // Check cache only for first page
-      if (pageNumber === 0) {
+      // Check cache only for the first unfiltered page
+      if (pageNumber === 0 && !query) {
         const now = Date.now();
         if (documentsCache.data && 
             documentsCache.timestamp && 
@@ -275,7 +281,10 @@ async function getDocuments(pageNumber = 0) {
       }
       
       const pageSize = CONFIG.API.DEFAULT_PAGE_SIZE;
-      const fetchUrl = `${serverUrl}/api/v1/documents?pageSize=${pageSize}&pageNumber=${pageNumber}&orderBy=lastModified desc`;
+      let fetchUrl = `${serverUrl}/api/v1/documents?pageSize=${pageSize}&pageNumber=${pageNumber}&orderBy=lastModified desc`;
+      if (query) {
+        fetchUrl += `&query=${encodeURIComponent(query)}`;
+      }
       log('Fetching documents from:', fetchUrl);
       
       const response = await fetchWithTimeout(fetchUrl, {
@@ -304,8 +313,8 @@ async function getDocuments(pageNumber = 0) {
       const totalPages = Math.ceil(totalDocs / pageSize);
       const hasMore = (pageNumber + 1) < totalPages;
       
-      // Cache only first page
-      if (pageNumber === 0) {
+      // Cache only the first unfiltered page
+      if (pageNumber === 0 && !query) {
         documentsCache = {
           data: documents,
           timestamp: Date.now(),
@@ -524,9 +533,31 @@ async function clipContent(request) {
       activeRequests.delete(cacheKey);
     }
   })();
-  
+
   activeRequests.set(cacheKey, requestPromise);
-  return requestPromise;
+  return rememberClipResult(requestPromise, 'Content saved successfully!');
+}
+
+/**
+ * Store the outcome of a clip in session storage so the popup can show it if it was closed
+ * while the clip was still running. The popup removes the entry once it has displayed it.
+ */
+async function rememberClipResult(resultPromise, successMessage) {
+  const result = await resultPromise;
+  try {
+    await chrome.storage.session.set({
+      lastClipResult: {
+        success: !!result.success,
+        message: result.success ? successMessage : (result.error || 'Failed to save'),
+        documentId: result.documentId || null,
+        globalId: result.globalId || null,
+        at: Date.now()
+      }
+    });
+  } catch (error) {
+    logError('Could not store clip result:', error);
+  }
+  return result;
 }
 
 function formatTimestamp(date) {
@@ -692,7 +723,7 @@ async function clipPdf(request) {
   })();
 
   activeRequests.set(cacheKey, requestPromise);
-  return requestPromise;
+  return rememberClipResult(requestPromise, 'PDF saved successfully!');
 }
 
 /**

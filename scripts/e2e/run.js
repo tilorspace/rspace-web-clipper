@@ -49,6 +49,7 @@ const NOTES = {
   selection2: 'note three selection again',
   urlOnly: 'note four url only',
   fullPage: 'note five full page',
+  lifecycle: 'note six after popup closed',
 };
 
 const TEST_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Clipper E2E page</title>
@@ -212,13 +213,14 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
 
     // The popup, opened as a page. chrome.tabs.query({active, currentWindow}) would return the
     // popup tab itself, so it is pointed at the test tab instead (see openPopup).
-    const popup = await openPopup(context, extensionId, testTab);
+    const popupRef = { current: await openPopup(context, extensionId, testTab) };
+    const popup = popupRef.current;
     sw.on('console', (m) => consoleLog.push(`[worker ${m.type()}] ${m.text()}`));
     const flushLog = () => fs.writeFileSync(path.join(artifacts, 'console.log'), consoleLog.join('\n'));
 
     // Connect
     await popup.waitForSelector('#auth-screen', { state: 'visible' });
-    const localStore = (keys) => popup.evaluate((k) => chrome.storage.local.get(k), keys);
+    const localStore = (keys) => popupRef.current.evaluate((k) => chrome.storage.local.get(k), keys);
 
     // URL input: deleting the scheme must prepend https:// rather than wipe the input.
     // The popup attaches its input listeners after an async auth check, so poll briefly.
@@ -278,6 +280,51 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     s = await clip(popup, { type: 'full-page', note: NOTES.fullPage });
     record('5 full-page clip', s.ok, s.text);
 
+    // WP9: server-side search finds a document that is not in the loaded pages
+    const page2 = await (await api(`/api/v1/documents?pageSize=50&pageNumber=2&orderBy=lastModified%20desc`)).json();
+    const farDoc = (page2.documents || []).find((d) => d.name.length > 3 && !d.name.startsWith('Clipper E2E'));
+    record('a document beyond the first page exists for the search test', !!farDoc, farDoc && farDoc.name);
+    if (farDoc) {
+      await popup.fill('#document-search', farDoc.name);
+      const found = popup.locator('.document-item.selected', { hasText: farDoc.name });
+      let visible = false;
+      try { await found.waitFor({ state: 'visible', timeout: 5000 }); visible = true; } catch {}
+      record('server search lists and selects a document outside the loaded pages', visible);
+      record('create hint hidden when an exact match exists', !(await popup.locator('#create-hint').isVisible()));
+    }
+
+    // WP9: Enter in the search box selects, it does not clip
+    await popup.fill('#document-search', DOC_NAME.slice(0, 12));
+    await popup.waitForTimeout(500);
+    await popup.press('#document-search', 'Enter');
+    await popup.waitForTimeout(300);
+    record('Enter selects the single partial match', (await popup.inputValue('#document-search')) === DOC_NAME && (await popup.locator('.document-item.selected').count()) === 1);
+    record('Enter does not start a clip', !(await popup.locator('#loading-screen').isVisible()) && !(await popup.locator('#clip-success.show').isVisible()));
+
+    // WP9: a clip that finishes after the popup was closed is reported on the next open
+    await popup.click('label[for="type-url"]');
+    await popup.fill('#document-search', DOC_NAME);
+    await popup.waitForTimeout(500);
+    await popup.fill('#note', NOTES.lifecycle);
+    await popup.click('#clip-btn');
+    await popup.close();
+    await page.waitForTimeout(4000);
+    const reopened = await openPopup(context, extensionId, testTab);
+    let pending = false;
+    try { await reopened.locator('#clip-success.show').waitFor({ state: 'visible', timeout: 5000 }); pending = true; } catch {}
+    record('result of a clip finished after popup close is shown on reopen', pending, pending ? (await reopened.locator('#clip-success').textContent()).trim() : '');
+    await reopened.screenshot({ path: path.join(artifacts, 'popup-reopened.png') });
+    await reopened.close();
+    const again = await openPopup(context, extensionId, testTab);
+    await again.waitForSelector('#clipper-screen', { state: 'visible', timeout: 20000 });
+    await again.waitForTimeout(500);
+    record('pending result is shown only once', !(await again.locator('#clip-success.show').isVisible()));
+    await again.close();
+    // continue with a fresh popup for the remaining scenarios
+    const popup2 = await openPopup(context, extensionId, testTab);
+    await popup2.waitForSelector('#clipper-screen', { state: 'visible', timeout: 20000 });
+    popupRef.current = popup2;
+
     // WP8: a page far above the single-canvas limit renders page by page
     const tallPage = await context.newPage();
     await tallPage.goto(`${TEST_ORIGIN}/tall`);
@@ -308,9 +355,9 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     await tallPage.close();
 
     // WP6: malformed ids from the popup side are rejected by the worker without a server call
-    const bad = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'clipContent', targetDoc: { isNew: false, id: '1/../2' }, content: { html: '<p>x</p>' } }));
+    const bad = await popupRef.current.evaluate(() => chrome.runtime.sendMessage({ action: 'clipContent', targetDoc: { isNew: false, id: '1/../2' }, content: { html: '<p>x</p>' } }));
     record('worker rejects a malformed document id', bad && bad.success === false && /Invalid document id/.test(bad.error), bad && bad.error);
-    const badField = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'getDocumentFields', documentId: 'abc' }));
+    const badField = await popupRef.current.evaluate(() => chrome.runtime.sendMessage({ action: 'getDocumentFields', documentId: 'abc' }));
     record('worker rejects a malformed field lookup id', badField && badField.success === false, badField && badField.error);
 
     // Logout via Settings > Clear Saved Data must wipe local storage, session and the worker cache
@@ -318,18 +365,18 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     let cached = false;
     for (let i = 0; i < 50 && !cached; i++) {
       cached = await sw.evaluate(() => Array.isArray(documentsCache.data));
-      if (!cached) await popup.waitForTimeout(100);
+      if (!cached) await popupRef.current.waitForTimeout(100);
     }
     record('worker cache populated after clipping', cached);
-    await popup.click('#settings-btn');
-    await popup.click('#clear-data-btn');
-    await popup.waitForTimeout(500);
+    await popupRef.current.click('#settings-btn');
+    await popupRef.current.click('#clear-data-btn');
+    await popupRef.current.waitForTimeout(500);
     stored = await localStore(['savedApiKey', 'apiKeyExpiresAt', 'savedServerUrl', 'rememberApiKey']);
-    const session = await popup.evaluate(() => chrome.storage.session.get(['serverUrl', 'accessToken']));
+    const session = await popupRef.current.evaluate(() => chrome.storage.session.get(['serverUrl', 'accessToken']));
     record('clear saved data removes persisted credentials', Object.keys(stored).length === 0, JSON.stringify(Object.keys(stored)));
     record('clear saved data clears session', !session.serverUrl && !session.accessToken);
     record('clear saved data clears worker cache', await sw.evaluate(() => documentsCache.data === null && activeRequests.size === 0));
-    await popup.screenshot({ path: path.join(artifacts, 'popup-after-clear.png') });
+    await popupRef.current.screenshot({ path: path.join(artifacts, 'popup-after-clear.png') });
 
     // WP3 regression: re-injecting content.js must not throw in the page
     const redeclared = consoleLog.filter((l) => /already been declared/.test(l));
@@ -346,7 +393,7 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
 
       record('tag web-clipper applied', (full.tags || '').includes('web-clipper'), full.tags);
       const clippedCount = (content.match(/Clipped from/g) || []).length;
-      record('four HTML clips present', clippedCount === 4, `found ${clippedCount}`);
+      record('five HTML clips present', clippedCount === 5, `found ${clippedCount}`);
       record('one PDF clip present', /PDF clipped from/.test(content));
       for (const [k, v] of Object.entries(NOTES)) {
         record(`note "${k}" present`, content.includes(v));
