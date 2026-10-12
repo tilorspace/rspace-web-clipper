@@ -28,7 +28,9 @@ function exists(rel) {
 
 // Permissions the extension is allowed to request. Adding one is a deliberate decision
 // that should update this list and the README privacy section together.
-const ALLOWED_PERMISSIONS = new Set(['activeTab', 'scripting', 'storage', 'tabs']);
+// 'tabs' is deliberately absent: activeTab already exposes url and title of the tab the popup was
+// opened on, and tabs.query / tabs.sendMessage need no permission.
+const ALLOWED_PERMISSIONS = new Set(['activeTab', 'scripting', 'storage']);
 const ALLOWED_OPTIONAL_HOSTS = new Set(['https://*/*', 'http://localhost/*', 'http://127.0.0.1/*']);
 
 // Files injected at runtime via chrome.scripting.executeScript (see popup.js).

@@ -251,6 +251,7 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
         record(`note "${k}" present`, content.includes(v));
       }
       record('sentinel text intact (sanitizer does not corrupt prose)', content.includes('configuration_id=5'), content.includes('configurati') && !content.includes('configuration_id=5') ? 'prose was mangled by the regex sanitizer (WP7)' : '');
+      record('source url and title captured from the tab', content.includes(`href="${TEST_ORIGIN}/"`) && content.includes('Clipper E2E page</a>'));
       record('relative link made absolute', content.includes(`${TEST_ORIGIN}/relative/link`));
       record('javascript: href removed', !/href="javascript:/i.test(content));
       record('onerror handler removed', !/onerror=/i.test(content));

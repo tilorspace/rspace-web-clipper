@@ -80,6 +80,18 @@ To upgrade a library: change the version in `package.json`, run `npm install`, t
 on every pull request.
 
 ---
+### Permissions and privacy
+
+The extension asks for the minimum Chrome permissions it can work with:
+
+- **activeTab** and **scripting**: read the page you are clipping from, only when you click Save.
+- **storage**: keep your server URL (and, if you opt in, your API key for a limited time) on this device.
+- **Access to your RSpace server**: requested once for the exact server URL you enter, nothing else.
+
+Page content, the page URL and title, your optional note, and (for PDF clips) a rendered PDF are
+sent only to the RSpace server you configured, using your own API key. Nothing is sent anywhere
+else, and the extension has no analytics or telemetry.
+
 ### Need Help?
 
 - Report any problems you encounter or any functionality you're missing [via the issue tracker](https://github.com/rspace-os/rspace-web-clipper/issues/new/choose) on this repository.
