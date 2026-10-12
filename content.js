@@ -265,11 +265,18 @@ const PDF_CONFIG = {
 
   // Layout settings
   MARGIN_MM: 10,                      // Page margins in millimeters
+  MAX_PAGES: 50,                      // Refuse pages that would need more PDF pages than this
 };
 
 /**
- * Generate PDF from current page using html2canvas and jsPDF
- * @returns {Promise<{pdfData: string}>} Promise resolving to PDF data as data URL
+ * Generate a PDF of the current page using html2canvas and jsPDF.
+ *
+ * The page is rendered one PDF page at a time: each slice of the document that fits the
+ * printable area is captured into its own canvas and added as one PDF page. Rendering the
+ * whole document into a single canvas (the previous approach) hit the browser's canvas size
+ * limit on long pages, which produced blank pages, and held the entire page bitmap in memory.
+ *
+ * @returns {Promise<{success: boolean, pdfData?: string, pages?: number, error?: string}>}
  */
 async function printPageToPdf() {
   log('printPageToPdf: Starting PDF generation...');
@@ -280,52 +287,71 @@ async function printPageToPdf() {
       throw new Error('PDF libraries not available');
     }
 
-    log('Libraries confirmed available');
-    log('Capturing page with html2canvas...');
-    const canvas = await html2canvas(document.body, {
-      scale: PDF_CONFIG.CANVAS_SCALE,
-      useCORS: PDF_CONFIG.USE_CORS,
-      logging: DEBUG,
-      windowWidth: document.documentElement.scrollWidth,
-      windowHeight: document.documentElement.scrollHeight,
-      allowTaint: PDF_CONFIG.ALLOW_TAINT,
-      backgroundColor: PDF_CONFIG.BACKGROUND_COLOR
-    });
-
-    log(`Canvas captured: ${canvas.width}x${canvas.height}px`);
-
-    const imgData = canvas.toDataURL('image/jpeg', PDF_CONFIG.JPEG_QUALITY);
-    log(`Image data created, size: ${Math.round(imgData.length / 1024)} KB`);
     const pdf = new jspdf.jsPDF({
       orientation: PDF_CONFIG.ORIENTATION,
       unit: PDF_CONFIG.UNIT,
       format: PDF_CONFIG.FORMAT
     });
 
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const pdfHeight = pdf.internal.pageSize.getHeight();
-    const marginDouble = PDF_CONFIG.MARGIN_MM * 2;
-    const imgWidth = pdfWidth - marginDouble;
-    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+    const printableWidthMm = pdf.internal.pageSize.getWidth() - PDF_CONFIG.MARGIN_MM * 2;
+    const printableHeightMm = pdf.internal.pageSize.getHeight() - PDF_CONFIG.MARGIN_MM * 2;
 
-    let heightLeft = imgHeight;
-    let position = PDF_CONFIG.MARGIN_MM;
+    // Page geometry in CSS pixels. One PDF page covers a slice whose aspect ratio matches
+    // the printable area, so the image is scaled uniformly without distortion.
+    const docWidth = document.documentElement.scrollWidth;
+    const docHeight = document.documentElement.scrollHeight;
+    const sliceHeight = Math.floor(docWidth * printableHeightMm / printableWidthMm);
+    const pageCount = Math.max(1, Math.ceil(docHeight / sliceHeight));
 
-    pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, position, imgWidth, imgHeight);
-    heightLeft -= (pdfHeight - marginDouble);
+    log(`Document ${docWidth}x${docHeight}px, slice height ${sliceHeight}px, ${pageCount} pages`);
 
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight + PDF_CONFIG.MARGIN_MM;
-      pdf.addPage();
-      pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, position, imgWidth, imgHeight);
-      heightLeft -= (pdfHeight - marginDouble);
+    if (pageCount > PDF_CONFIG.MAX_PAGES) {
+      throw new Error(`Page is too long to save as PDF (${pageCount} pages, limit is ${PDF_CONFIG.MAX_PAGES}). Try the Selection or Full Page option instead.`);
+    }
+
+    for (let page = 0; page < pageCount; page++) {
+      const y = page * sliceHeight;
+      const height = Math.min(sliceHeight, docHeight - y);
+
+      const canvas = await html2canvas(document.body, {
+        scale: PDF_CONFIG.CANVAS_SCALE,
+        useCORS: PDF_CONFIG.USE_CORS,
+        logging: DEBUG,
+        allowTaint: PDF_CONFIG.ALLOW_TAINT,
+        backgroundColor: PDF_CONFIG.BACKGROUND_COLOR,
+        // Lay the clone out at the full document size so every slice sees the same layout...
+        windowWidth: docWidth,
+        windowHeight: docHeight,
+        // ...and crop the rendering to this page's slice, measured from the top of the document
+        x: 0,
+        y,
+        width: docWidth,
+        height,
+        scrollX: 0,
+        scrollY: 0
+      });
+
+      const imgData = canvas.toDataURL('image/jpeg', PDF_CONFIG.JPEG_QUALITY);
+      const imgHeightMm = canvas.height * printableWidthMm / canvas.width;
+
+      if (page > 0) {
+        pdf.addPage();
+      }
+      pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, PDF_CONFIG.MARGIN_MM, printableWidthMm, imgHeightMm);
+
+      // Release the slice bitmap before rendering the next one
+      canvas.width = 0;
+      canvas.height = 0;
+
+      log(`Rendered page ${page + 1}/${pageCount}`);
     }
 
     const pdfData = pdf.output('dataurlstring');
-    log(`PDF generated successfully, size: ${Math.round(pdfData.length / 1024)} KB`);
+    log(`PDF generated successfully, ${pageCount} pages, size: ${Math.round(pdfData.length / 1024)} KB`);
 
     return {
       pdfData: pdfData,
+      pages: pageCount,
       success: true
     };
 

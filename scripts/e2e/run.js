@@ -87,10 +87,52 @@ function startTestServer() {
         return res.end();
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      if (req.url.startsWith('/tall')) {
+        // ~20 000 px tall: above Chrome's single-canvas limit, so only slice rendering can cope
+        const blocks = Array.from({ length: 22 }, (_, i) => `<div class="block">Tall block ${i + 1}</div>`).join('');
+        return res.end(TEST_PAGE.replace('<title>Clipper E2E page</title>', '<title>Clipper E2E tall page</title>').replace(/<div class="block">Block 1<\/div>[\s\S]*?<div class="block">Block 4<\/div>/, blocks));
+      }
       res.end(TEST_PAGE);
     });
     server.listen(TEST_PORT, '127.0.0.1', () => resolve(server));
   });
+}
+
+/**
+ * Rough structural check of a generated PDF: page count and the byte length of the image
+ * stream on each page. A blank white JPEG slice compresses to a few hundred bytes, so a
+ * healthy page carries a stream well above that.
+ */
+function inspectPdf(bytes) {
+  const text = bytes.toString('latin1');
+  const pages = (text.match(/\/Type\s*\/Page[^s]/g) || []).length;
+  const imageLengths = [];
+  const re = /\/Subtype\s*\/Image[^>]*?\/Length\s+(\d+)/g;
+  let m;
+  while ((m = re.exec(text))) imageLengths.push(Number(m[1]));
+  return { valid: bytes.slice(0, 5).toString() === '%PDF-', pages, imageLengths };
+}
+
+/** Open the popup as a page whose "active tab" is the given tab. */
+async function openPopup(context, extensionId, tab) {
+  const popup = await context.newPage();
+  popup.on('console', (m) => consoleLog.push(`[popup ${m.type()}] ${m.text()}`));
+  popup.on('pageerror', (e) => consoleLog.push(`[popup pageerror] ${e.message}`));
+  await popup.addInitScript((t) => {
+    const original = chrome.tabs.query.bind(chrome.tabs);
+    chrome.tabs.query = (q, cb) => {
+      if (q && q.active && q.currentWindow) {
+        return original({}).then((tabs) => {
+          const r = tabs.filter((x) => x.id === t.id);
+          if (cb) cb(r);
+          return r;
+        });
+      }
+      return original(q, cb);
+    };
+  }, tab);
+  await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+  return popup;
 }
 
 function buildTestExtension() {
@@ -169,27 +211,10 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     record('test page open in a tab', !!testTab, `tab ${testTab && testTab.id}`);
 
     // The popup, opened as a page. chrome.tabs.query({active, currentWindow}) would return the
-    // popup tab itself, so it is pointed at the test tab instead.
-    const popup = await context.newPage();
-    await popup.addInitScript((tab) => {
-      const original = chrome.tabs.query.bind(chrome.tabs);
-      chrome.tabs.query = (q, cb) => {
-        if (q && q.active && q.currentWindow) {
-          const p = original({});
-          return p.then((tabs) => {
-            const t = tabs.filter((x) => x.id === tab.id);
-            if (cb) cb(t);
-            return t;
-          });
-        }
-        return original(q, cb);
-      };
-    }, testTab);
-    popup.on('console', (m) => consoleLog.push(`[popup ${m.type()}] ${m.text()}`));
-    popup.on('pageerror', (e) => consoleLog.push(`[popup pageerror] ${e.message}`));
+    // popup tab itself, so it is pointed at the test tab instead (see openPopup).
+    const popup = await openPopup(context, extensionId, testTab);
     sw.on('console', (m) => consoleLog.push(`[worker ${m.type()}] ${m.text()}`));
     const flushLog = () => fs.writeFileSync(path.join(artifacts, 'console.log'), consoleLog.join('\n'));
-    await popup.goto(`chrome-extension://${extensionId}/popup.html`);
 
     // Connect
     await popup.waitForSelector('#auth-screen', { state: 'visible' });
@@ -253,6 +278,35 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     s = await clip(popup, { type: 'full-page', note: NOTES.fullPage });
     record('5 full-page clip', s.ok, s.text);
 
+    // WP8: a page far above the single-canvas limit renders page by page
+    const tallPage = await context.newPage();
+    await tallPage.goto(`${TEST_ORIGIN}/tall`);
+    const tallHeight = await tallPage.evaluate(() => document.documentElement.scrollHeight);
+    const [tallTab] = await sw.evaluate((url) => chrome.tabs.query({ url: url + '/tall*' }), TEST_ORIGIN);
+    const tallPopup = await openPopup(context, extensionId, tallTab);
+    await tallPopup.waitForSelector('#clipper-screen', { state: 'visible', timeout: 20000 });
+    const TALL_DOC = DOC_NAME + ' tall';
+    await tallPopup.click('label[for="type-pdf"]');
+    await tallPopup.fill('#document-search', TALL_DOC);
+    await tallPopup.waitForTimeout(500);
+    await tallPopup.click('#clip-btn');
+    const tallStatus = await waitForStatus(tallPopup, 180000);
+    record(`6 pdf clip of a ${tallHeight}px tall page`, tallStatus.ok, tallStatus.text);
+    await tallPopup.screenshot({ path: path.join(artifacts, 'popup-tall-pdf.png') });
+    if (tallStatus.ok) {
+      const files = await (await api(`/api/v1/files?pageSize=10&orderBy=created%20desc`)).json();
+      const tallPdf = (files.files || []).find((f) => f.name && f.name.startsWith('Clipper_E2E_tall_page'));
+      record('tall PDF uploaded', !!tallPdf, tallPdf && `${tallPdf.size} bytes`);
+      if (tallPdf) {
+        const bytes = Buffer.from(await (await api(`/api/v1/files/${tallPdf.id}/file`)).arrayBuffer());
+        fs.writeFileSync(path.join(artifacts, 'clipped-tall.pdf'), bytes);
+        const info = inspectPdf(bytes);
+        record('tall PDF has many pages, each with content', info.valid && info.pages >= 8 && info.imageLengths.length === info.pages && info.imageLengths.every((n) => n > 2000), `${info.pages} pages; image bytes: ${info.imageLengths.join(', ')}`);
+      }
+    }
+    await tallPopup.close();
+    await tallPage.close();
+
     // WP6: malformed ids from the popup side are rejected by the worker without a server call
     const bad = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'clipContent', targetDoc: { isNew: false, id: '1/../2' }, content: { html: '<p>x</p>' } }));
     record('worker rejects a malformed document id', bad && bad.success === false && /Invalid document id/.test(bad.error), bad && bad.error);
@@ -312,8 +366,9 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
       if (pdf) {
         const bytes = Buffer.from(await (await api(`/api/v1/files/${pdf.id}/file`)).arrayBuffer());
         fs.writeFileSync(path.join(artifacts, 'clipped.pdf'), bytes);
-        const pages = (bytes.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
-        record('PDF is valid and multi-page', bytes.slice(0, 5).toString() === '%PDF-' && pages > 1, `${pages} pages, ${bytes.length} bytes`);
+        const info = inspectPdf(bytes);
+        record('PDF is valid and multi-page', info.valid && info.pages > 1, `${info.pages} pages, ${bytes.length} bytes`);
+        record('every PDF page carries rendered content', info.imageLengths.length === info.pages && info.imageLengths.every((n) => n > 2000), `image bytes per page: ${info.imageLengths.join(', ')}`);
       }
 
     }

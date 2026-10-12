@@ -80,6 +80,17 @@ To upgrade a library: change the version in `package.json`, run `npm install`, t
 on every pull request.
 
 ---
+### Known limitations
+
+- **PDF mode** renders the page with html2canvas, so it is a visual snapshot, not a print
+  layout: images from other domains that do not send CORS headers are left blank, and complex
+  CSS (fixed positioning, web fonts loaded late, canvas or video) may not render exactly.
+  Pages that would need more than 50 A4 pages are refused.
+- **Full Page** mode clips the main content area and strips navigation, headers, footers and
+  sidebars; the result is plain HTML in RSpace and will not look like the original page.
+- Clips are appended to the end of a document field. Editing the same field in RSpace at the
+  same moment can overwrite the clip.
+
 ### Permissions and privacy
 
 The extension asks for the minimum Chrome permissions it can work with:
