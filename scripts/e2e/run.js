@@ -247,6 +247,12 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     s = await clip(popup, { type: 'full-page', note: NOTES.fullPage });
     record('5 full-page clip', s.ok, s.text);
 
+    // WP6: malformed ids from the popup side are rejected by the worker without a server call
+    const bad = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'clipContent', targetDoc: { isNew: false, id: '1/../2' }, content: { html: '<p>x</p>' } }));
+    record('worker rejects a malformed document id', bad && bad.success === false && /Invalid document id/.test(bad.error), bad && bad.error);
+    const badField = await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'getDocumentFields', documentId: 'abc' }));
+    record('worker rejects a malformed field lookup id', badField && badField.success === false, badField && badField.error);
+
     // Logout via Settings > Clear Saved Data must wipe local storage, session and the worker cache
     // The popup reloads the document list after a clip; wait for that to repopulate the cache
     let cached = false;

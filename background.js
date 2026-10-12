@@ -9,14 +9,32 @@ const DEBUG = false;
 const log = DEBUG ? console.log : () => {};
 const logError = DEBUG ? console.error : () => {};
 
-// Document cache with TTL
-let documentsCache = {
-  data: null,
-  timestamp: null,
-  ttl: 5 * 60 * 1000, // 5 minutes
-  totalPages: null,
-  pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
-};
+// Document cache with TTL (first page only)
+let documentsCache = emptyDocumentsCache();
+
+function emptyDocumentsCache() {
+  return {
+    data: null,
+    timestamp: null,
+    ttl: CONFIG.CACHE.DOCUMENTS_TTL_MS,
+    totalPages: null,
+    pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
+  };
+}
+
+function resetDocumentsCache() {
+  documentsCache = emptyDocumentsCache();
+}
+
+/**
+ * Validate an RSpace numeric id coming from the popup before it is used in a URL.
+ * @param {*} value
+ * @returns {number|null} the id as a positive integer, or null if invalid
+ */
+function toValidId(value) {
+  const n = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
 
 // Request deduplication map
 const activeRequests = new Map();
@@ -37,6 +55,34 @@ function getHttpErrorMessage(response) {
     return 'Server error. Please try again later.';
   }
   return 'Request failed. Please try again.';
+}
+
+/**
+ * Validate the popup's request and resolve the document (and field) to write to.
+ * Creates the document when request.targetDoc.isNew is set.
+ * @returns {Promise<{success: boolean, documentId?: number, globalId?: string, error?: string}>}
+ */
+async function resolveTargetDocument(serverUrl, accessToken, request) {
+  const targetDoc = request && request.targetDoc;
+  if (!targetDoc || typeof targetDoc !== 'object') {
+    return { success: false, error: 'No target document specified' };
+  }
+  if (request.targetField && toValidId(request.targetField.id) === null) {
+    return { success: false, error: 'Invalid field id' };
+  }
+  if (targetDoc.isNew) {
+    const title = typeof targetDoc.title === 'string' ? targetDoc.title.trim() : '';
+    if (!title || title.length > CONFIG.LIMITS.MAX_DOC_TITLE_LENGTH) {
+      return { success: false, error: 'Invalid document title' };
+    }
+    return createDocument(serverUrl, accessToken, title);
+  }
+  const documentId = toValidId(targetDoc.id);
+  if (documentId === null) {
+    return { success: false, error: 'Invalid document id' };
+  }
+  log('Using existing document ID:', documentId);
+  return { success: true, documentId, globalId: targetDoc.globalId };
 }
 
 /**
@@ -137,13 +183,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function handleLogout() {
   try {
     await chrome.storage.session.clear();
-    documentsCache = {
-      data: null,
-      timestamp: null,
-      ttl: 5 * 60 * 1000,
-      totalPages: null,
-      pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
-    };
+    resetDocumentsCache();
     activeRequests.clear();
     log('Logged out, cache cleared');
     return { success: true };
@@ -184,13 +224,7 @@ async function handleAuth(serverUrl, apiKey) {
     });
     
     // Clear cache on new auth
-    documentsCache = {
-      data: null,
-      timestamp: null,
-      ttl: 5 * 60 * 1000,
-      totalPages: null,
-      pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
-    };
+    resetDocumentsCache();
     
     log('Credentials stored successfully');
     return { success: true };
@@ -275,7 +309,7 @@ async function getDocuments(pageNumber = 0) {
         documentsCache = {
           data: documents,
           timestamp: Date.now(),
-          ttl: 5 * 60 * 1000,
+          ttl: CONFIG.CACHE.DOCUMENTS_TTL_MS,
           totalPages: totalPages,
           pageSize: pageSize
         };
@@ -305,6 +339,10 @@ async function getDocuments(pageNumber = 0) {
  */
 async function getDocumentFields(documentId) {
   try {
+    documentId = toValidId(documentId);
+    if (documentId === null) {
+      return { success: false, error: 'Invalid document id' };
+    }
     const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
     if (!serverUrl || !accessToken) {
       return { success: false, error: 'Not authenticated' };
@@ -359,21 +397,11 @@ async function clipContent(request) {
         return { success: false, error: 'Not authenticated. Please reconnect.' };
       }
       
-      let documentId;
-      let globalId;
-
-      if (request.targetDoc.isNew) {
-        const result = await createDocument(serverUrl, accessToken, request.targetDoc.title);
-        if (!result.success) {
-          return result;
-        }
-        documentId = result.documentId;
-        globalId = result.globalId;
-      } else {
-        documentId = request.targetDoc.id;
-        globalId = request.targetDoc.globalId;
-        log('Using existing document ID:', documentId);
+      const target = await resolveTargetDocument(serverUrl, accessToken, request);
+      if (!target.success) {
+        return target;
       }
+      const { documentId, globalId } = target;
       
       // Get current document content
       log('Fetching document content for ID:', documentId);
@@ -481,13 +509,7 @@ async function clipContent(request) {
       }
       
       // Invalidate cache after successful clip
-      documentsCache = {
-        data: null,
-        timestamp: null,
-        ttl: 5 * 60 * 1000,
-        totalPages: null,
-        pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
-      };
+      resetDocumentsCache();
       
       log('Successfully clipped content!');
       return { success: true, documentId, globalId };
@@ -615,21 +637,11 @@ async function clipPdf(request) {
       }
 
       // Step 2: Determine target document
-      let documentId;
-      let globalId;
-
-      if (request.targetDoc.isNew) {
-        const result = await createDocument(serverUrl, accessToken, request.targetDoc.title);
-        if (!result.success) {
-          return result;
-        }
-        documentId = result.documentId;
-        globalId = result.globalId;
-      } else {
-        documentId = request.targetDoc.id;
-        globalId = request.targetDoc.globalId;
-        log('Using existing document ID:', documentId);
+      const target = await resolveTargetDocument(serverUrl, accessToken, request);
+      if (!target.success) {
+        return target;
       }
+      const { documentId, globalId } = target;
 
       // Step 3: Upload PDF as file to RSpace
       log('Uploading PDF file to RSpace...');
@@ -651,13 +663,7 @@ async function clipPdf(request) {
       }
 
       // Invalidate cache after successful clip
-      documentsCache = {
-        data: null,
-        timestamp: null,
-        ttl: 5 * 60 * 1000,
-        totalPages: null,
-        pageSize: CONFIG.API.DEFAULT_PAGE_SIZE
-      };
+      resetDocumentsCache();
 
       log('Successfully clipped PDF!');
       return { success: true, documentId, globalId };
@@ -740,13 +746,13 @@ async function uploadPdfToRSpace(serverUrl, accessToken, pdfDataUrl, fileName) {
     log('Uploading file to RSpace API...');
     const uploadUrl = `${serverUrl}/api/v1/files`;
 
-    const uploadResponse = await fetch(uploadUrl, {
+    const uploadResponse = await fetchWithTimeout(uploadUrl, {
       method: 'POST',
       headers: {
         'apiKey': accessToken
       },
       body: formData
-    });
+    }, CONFIG.API.UPLOAD_TIMEOUT_MS);
 
     if (!uploadResponse.ok) {
       const errorText = await uploadResponse.text();
@@ -771,6 +777,9 @@ async function uploadPdfToRSpace(serverUrl, accessToken, pdfDataUrl, fileName) {
     return fileId;
   } catch (error) {
     logError('Error uploading PDF:', error);
+    if (error.message === 'Request timeout') {
+      throw error; // let clipPdf report the timeout to the user
+    }
     return null;
   }
 }
@@ -885,7 +894,7 @@ function sanitizeFilename(filename) {
 /**
  * Fetch with timeout wrapper
  */
-async function fetchWithTimeout(url, options = {}, timeout = CONFIG.API.TIMEOUT_MS || 30000) {
+async function fetchWithTimeout(url, options = {}, timeout = CONFIG.API.REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 

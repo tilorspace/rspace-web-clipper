@@ -17,7 +17,8 @@
     "check-manifest": "node scripts/check-manifest.js",
     "audit": "npm audit --omit=dev --audit-level=high",
     "e2e": "node scripts/e2e/run.js",
-    "test": "npm run check-libs && npm run check-manifest && npm run audit"
+    "unit": "node scripts/test-background.js",
+    "test": "npm run check-libs && npm run check-manifest && npm run unit && npm run audit"
   },
   "dependencies": {
     "html2canvas": "1.4.1",
