@@ -16,10 +16,14 @@
     "check-libs": "node scripts/copy-libs.js --check",
     "check-manifest": "node scripts/check-manifest.js",
     "audit": "npm audit --omit=dev --audit-level=high",
+    "e2e": "node scripts/e2e/run.js",
     "test": "npm run check-libs && npm run check-manifest && npm run audit"
   },
   "dependencies": {
     "html2canvas": "1.4.1",
     "jspdf": "4.2.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.0"
   }
 }

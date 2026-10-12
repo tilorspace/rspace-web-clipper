@@ -64,6 +64,17 @@ npm run audit         # fail on high or critical advisories in the shipped libra
 npm test              # all of the above
 ```
 
+End-to-end test against a running RSpace (loads the extension into Chromium via Playwright, clips
+a local test page in every mode, and verifies the result through the RSpace API):
+
+```bash
+npx playwright install chromium
+node --env-file=/path/to/.env scripts/e2e/run.js   # .env defines RSPACE_URL and RSPACE_API_KEY
+```
+
+Set `HEADED=1` to watch the browser. Screenshots, the stored document HTML and the uploaded PDF
+land in `web-ext-artifacts/e2e/`. The harness deletes the test documents it creates.
+
 To upgrade a library: change the version in `package.json`, run `npm install`, then
 `npm run copy-libs`, and commit both the lockfile and the refreshed bundle. CI runs the same checks
 on every pull request.
