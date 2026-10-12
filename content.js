@@ -110,7 +110,7 @@ function getFullPageContent() {
   const clone = mainContent.cloneNode(true);
   
   // Remove script, style, and navigation elements
-  ['script', 'style', 'nav', 'header', 'footer', 'iframe'].forEach(tag => {
+  ['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe'].forEach(tag => {
     clone.querySelectorAll(tag).forEach(el => el.remove());
   });
   
@@ -154,8 +154,9 @@ function cleanHtml(html) {
   // Security: Sanitize all remaining elements
   const elements = div.querySelectorAll('*');
   elements.forEach(el => {
-    // Whitelist ONLY truly safe attributes
-    const safeAttrs = ['href', 'src', 'alt', 'title'];
+    // Whitelist ONLY truly safe attributes. colspan/rowspan/scope keep table structure,
+    // width/height keep image sizing; none of them can carry script.
+    const safeAttrs = ['href', 'src', 'alt', 'title', 'colspan', 'rowspan', 'scope', 'width', 'height'];
     Array.from(el.attributes).forEach(attr => {
       // Remove all event handlers (onclick, onload, etc.)
       if (attr.name.startsWith('on') || !safeAttrs.includes(attr.name)) {

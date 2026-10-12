@@ -131,6 +131,22 @@ const jsonResponse = (body, status = 200) => ({
     console.log('ok  stalled PDF upload times out');
   }
 
+  // 6. Worker-side sanitizer only touches tags, never prose
+  {
+    const w = makeWorker({ fetchImpl: () => { throw new Error('no fetch'); } });
+    const sanitize = w.get('sanitizeClippedHtml');
+    const prose = '<p>configuration_id=5, onclick=handler and javascript: as text, version=1.2</p>';
+    assert.strictEqual(sanitize(prose), prose, 'prose untouched');
+    assert.strictEqual(sanitize('<img src="a.png" onerror="alert(1)" alt="x">'), '<img src="a.png" alt="x">');
+    assert.strictEqual(sanitize("<a onclick='go()' href=\"http://ok\">t</a>"), '<a href="http://ok">t</a>');
+    assert.strictEqual(sanitize('<a href="javascript:alert(1)">t</a>'), '<a>t</a>');
+    assert.strictEqual(sanitize('<a href=" JaVa\tscript:alert(1)">t</a>'), '<a>t</a>');
+    assert.strictEqual(sanitize('<a href="https://example.org/?q=javascript:x">t</a>'), '<a href="https://example.org/?q=javascript:x">t</a>', 'scheme check only at start');
+    assert.strictEqual(sanitize('<p>a</p><script type="text/javascript">x()</script><p>b</p>'), '<p>a</p><p>b</p>');
+    assert.strictEqual(sanitize('<td colspan="2" onmouseover=x>c</td>'), '<td colspan="2">c</td>');
+    console.log('ok  worker sanitizer strips handlers and script URLs inside tags only');
+  }
+
   console.log('all background tests passed');
 })().catch((e) => {
   console.error('FAIL', e.message);

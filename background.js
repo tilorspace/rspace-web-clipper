@@ -580,18 +580,30 @@ function formatClippedContent(request, timestamp) {
   return html;
 }
 
+/**
+ * Second sanitization layer, applied in the worker where no DOM parser is available.
+ *
+ * The real sanitizer is cleanHtml() in content.js, which works on a parsed DOM. This pass only
+ * guards against something slipping through and it operates strictly inside tags, so text such
+ * as "configuration_id=5" or a sentence mentioning "javascript:" is never altered. (An earlier
+ * version ran the patterns over the whole string and mangled prose.)
+ */
 function sanitizeClippedHtml(html) {
-  // Additional security layer: ensure no dangerous patterns made it through
   if (!html) return '';
-  
-  // Remove any remaining script tags or event handlers that might have slipped through
-  let cleaned = html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/on\w+\s*=\s*["'][^"']*["']/gi, '')
-    .replace(/on\w+\s*=\s*[^\s>]*/gi, '')
-    .replace(/javascript:/gi, '')
-    .replace(/vbscript:/gi, '');
-  
+
+  // Drop script blocks outright
+  let cleaned = html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
+
+  // Inside each tag: strip on* handlers and any URL attribute with a script scheme
+  cleaned = cleaned.replace(/<\/?[a-zA-Z][^>]*>/g, (tag) => {
+    let t = tag.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+    t = t.replace(/\s+(href|src|xlink:href|action|formaction)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, (match, name, value) => {
+      const v = value.replace(/^["']|["']$/g, '').replace(/[\s\u0000-\u001f]/g, '').toLowerCase();
+      return v.startsWith('javascript:') || v.startsWith('vbscript:') ? '' : match;
+    });
+    return t;
+  });
+
   return cleaned;
 }
 

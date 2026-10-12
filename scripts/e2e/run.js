@@ -42,7 +42,7 @@ const TEST_ORIGIN = `http://127.0.0.1:${TEST_PORT}`;
 const DOC_NAME = `Clipper E2E ${new Date().toISOString().replace(/[:.]/g, '-')}`;
 
 // Sentinels we look for in the saved content
-const SENTINEL_TEXT = 'Sentinel paragraph for the selection clip. configuration_id=5 and the word javascript: appear here.';
+const SENTINEL_TEXT = 'Sentinel paragraph for the selection clip. configuration_id=5, onclick=handler and the word javascript: appear here as plain text.';
 const NOTES = {
   selection1: 'note one selection',
   pdf: 'note two pdf',
@@ -195,9 +195,15 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
     await popup.waitForSelector('#auth-screen', { state: 'visible' });
     const localStore = (keys) => popup.evaluate((k) => chrome.storage.local.get(k), keys);
 
-    // URL input: deleting the scheme must prepend https:// rather than wipe the input
-    await popup.fill('#server-url', 'example.org');
-    record('url input restores https:// in front of a bare host', (await popup.inputValue('#server-url')) === 'https://example.org');
+    // URL input: deleting the scheme must prepend https:// rather than wipe the input.
+    // The popup attaches its input listeners after an async auth check, so poll briefly.
+    let prefixed = false;
+    for (let i = 0; i < 20 && !prefixed; i++) {
+      await popup.fill('#server-url', 'example.org');
+      prefixed = (await popup.inputValue('#server-url')) === 'https://example.org';
+      if (!prefixed) await popup.waitForTimeout(100);
+    }
+    record('url input restores https:// in front of a bare host', prefixed);
 
     // Wrong key with "remember" checked must not be persisted
     await popup.fill('#server-url', RSPACE_URL);
@@ -291,7 +297,8 @@ async function clip(popup, { type, note, timeoutMs = 30000 }) {
       for (const [k, v] of Object.entries(NOTES)) {
         record(`note "${k}" present`, content.includes(v));
       }
-      record('sentinel text intact (sanitizer does not corrupt prose)', content.includes('configuration_id=5'), content.includes('configurati') && !content.includes('configuration_id=5') ? 'prose was mangled by the regex sanitizer (WP7)' : '');
+      record('sentinel text intact (sanitizer does not corrupt prose)', content.includes(SENTINEL_TEXT), content.includes(SENTINEL_TEXT) ? '' : (content.match(/Sentinel paragraph[^<]*/) || ['sentinel missing'])[0]);
+      record('table colspan preserved', /colspan="2"/.test(content));
       record('source url and title captured from the tab', content.includes(`href="${TEST_ORIGIN}/"`) && content.includes('Clipper E2E page</a>'));
       record('relative link made absolute', content.includes(`${TEST_ORIGIN}/relative/link`));
       record('javascript: href removed', !/href="javascript:/i.test(content));
