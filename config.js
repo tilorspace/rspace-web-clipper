@@ -2,9 +2,8 @@
 // Loaded by popup.html before popup.js and imported by background.js (importScripts).
 // content.js is injected on its own and carries its own copy of the logging switch.
 
-// Logging is off in release builds; flip DEBUG to trace in the worker and popup consoles.
+// Logging is off in release builds; flip DEBUG to see errors in the worker and popup consoles.
 const DEBUG = false;
-const log = DEBUG ? console.log : () => {};
 const logError = DEBUG ? console.error : () => {};
 
 const CONFIG = {

@@ -10,6 +10,10 @@ const vm = require('vm');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '..');
+const sources = {};
+for (const file of ['config.js', 'background.js']) {
+  sources[file] = new vm.Script(fs.readFileSync(path.join(root, file), 'utf8'), { filename: file });
+}
 
 function makeWorker({ fetchImpl, session = { serverUrl: 'http://rspace.test', accessToken: 'k' } } = {}) {
   const calls = [];
@@ -41,11 +45,11 @@ function makeWorker({ fetchImpl, session = { serverUrl: 'http://rspace.test', ac
       tabs: { sendMessage: async () => ({ pdfData: 'data:application/pdf;base64,AA==' }) },
     },
     importScripts(file) {
-      vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), ctx, { filename: file });
+      sources[file].runInContext(ctx);
     },
   };
   const ctx = vm.createContext(sandbox);
-  vm.runInContext(fs.readFileSync(path.join(root, 'background.js'), 'utf8'), ctx, { filename: 'background.js' });
+  sources['background.js'].runInContext(ctx);
   const send = (request) => vm.runInContext('handleMessage', ctx)(request);
   return { ctx, calls, state, send, get: (name) => vm.runInContext(name, ctx) };
 }
@@ -116,6 +120,21 @@ const hang = (url, opts) => new Promise((_, rej) => opts.signal.addEventListener
     console.log('ok  clip appends to the field, remembers its result, and deduplicates');
   }
 
+  // 3b. A clip into a new document needs no GET: the POST response carries the field
+  {
+    const w = makeWorker({
+      fetchImpl: async (url, opts) => (opts && opts.method === 'POST')
+        ? jsonResponse({ id: 99, globalId: 'SD99', fields: [{ id: 5, content: '' }] })
+        : jsonResponse({}),
+    });
+    const r = await w.send({ action: 'clipContent', targetDoc: { isNew: true, title: 'New' }, content: { html: '<p>x</p>' }, sourceUrl: 'u', sourceTitle: 't' });
+    assert.strictEqual(r.success, true, JSON.stringify(r));
+    assert.deepStrictEqual(w.calls.map((c) => (c.opts && c.opts.method) || 'GET'), ['POST', 'PUT']);
+    assert.strictEqual(r.documentId, 99);
+    assert.strictEqual(r.fields.length, 1, 'fields returned for the popup');
+    console.log('ok  new-document clip is a POST and a PUT, no GET');
+  }
+
   // 4. Form document without a chosen field, and with a chosen field
   {
     const fields = [{ id: 1, content: 'a' }, { id: 2, content: 'b' }];
@@ -136,10 +155,24 @@ const hang = (url, opts) => new Promise((_, rej) => opts.signal.addEventListener
     const r = await w.send({ action: 'getDocuments' });
     assert.deepStrictEqual(Object.keys(w.state.session), []);
     assert.strictEqual(r.error, 'Not authenticated');
+    assert.strictEqual(r.code, 'NOT_AUTHENTICATED');
     const r2 = await w.send({ action: 'getDocuments' });
     assert.strictEqual(r2.error, 'Not authenticated', 'no credentials afterwards');
     assert.strictEqual(w.calls.length, 1, 'no request without credentials');
     console.log('ok  401 clears the session and maps to Not authenticated');
+  }
+
+  // 5b. Credentials are read from storage once, not per request
+  {
+    let reads = 0;
+    const w = makeWorker({ fetchImpl: async () => jsonResponse({ documents: [], totalHits: 0 }) });
+    const original = w.ctx.chrome.storage.session.get;
+    w.ctx.chrome.storage.session.get = async (k) => { reads++; return original(k); };
+    await w.send({ action: 'getDocuments' });
+    await w.send({ action: 'getDocuments' });
+    await w.send({ action: 'getDocumentFields', documentId: 1 });
+    assert.strictEqual(reads, 1, `storage read ${reads} times`);
+    console.log('ok  credentials are cached after the first read');
   }
 
   // 6. Network failure and server error messages
@@ -148,7 +181,7 @@ const hang = (url, opts) => new Promise((_, rej) => opts.signal.addEventListener
     assert.match((await w.send({ action: 'getDocuments' })).error, /Could not reach/);
     const w2 = makeWorker({ fetchImpl: async () => jsonResponse({ message: 'internal regexp detail' }, 500) });
     const r = await w2.send({ action: 'clipContent', targetDoc: { isNew: true, title: 'T' }, content: { html: 'x' } });
-    assert.match(r.error, /Unable to create document/);
+    assert.match(r.error, /Server error/);
     assert.doesNotMatch(r.error, /regexp/, 'server text is not shown to the user');
     console.log('ok  network and server errors map to user-facing messages');
   }

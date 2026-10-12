@@ -44,7 +44,10 @@ Hardening release following a code and dependency review.
 - Popup: one `setSelectedDocument()` owns the selection state; the two clip handlers merged
   into `handleSave()`; the URL prefix protection, the one-time migration and the document cache
   were removed. Worker: shared `appendToField()` for HTML and PDF clips, one error mapping for
-  all messages, 401 handled in one place. About 1400 lines removed.
+  all messages, 401 handled in one place, credentials read once and cached. A clip into a new
+  document is two requests instead of three, and the popup reuses the fields the worker
+  returns instead of fetching them again. PDFs render several pages per html2canvas pass.
+  About 1400 lines removed.
 
 ### Development
 - `package.json` pins the bundled libraries; `npm test` runs bundle, manifest, unit and audit checks.

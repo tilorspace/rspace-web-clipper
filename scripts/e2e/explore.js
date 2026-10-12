@@ -4,6 +4,7 @@
 // to judge rather than assertions.
 //
 //   node --env-file=/path/to/.env scripts/e2e/explore.js
+//   EXPLORE_ONLY=AB ... runs only the listed scenario letters
 //
 // External sites (Wikipedia, developer.chrome.com) are used for the real-world scenarios and
 // skipped if unreachable.
@@ -12,15 +13,10 @@ const fs = require('fs');
 const path = require('path');
 const L = require('./lib');
 
-L.requireEnv();
-const R = L.makeReporter();
-const artifacts = path.join(L.root, 'web-ext-artifacts', 'explore');
-fs.mkdirSync(artifacts, { recursive: true });
-
-const TEST_PORT = 8766;
-const TEST_ORIGIN = `http://127.0.0.1:${TEST_PORT}`;
-const STAMP = new Date().toISOString().replace(/[:.]/g, '-');
 const PREFIX = 'Clipper EXP ';
+const STAMP = L.stamp();
+const name = (label) => `${PREFIX}${label} ${STAMP}`;
+
 const EXTERNAL = [
   { name: 'Wikipedia article', url: 'https://en.wikipedia.org/wiki/Electronic_lab_notebook', origin: 'https://en.wikipedia.org', selectIn: '#mw-content-text p' },
   { name: 'Chrome extension docs (JS heavy)', url: 'https://developer.chrome.com/docs/extensions/develop/concepts/activeTab', origin: 'https://developer.chrome.com', selectIn: 'main p' },
@@ -34,11 +30,9 @@ const TEST_PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Clipp
 <ul><li>one</li><li>two</li></ul>
 </main></body></html>`;
 
-const name = (label) => `${PREFIX}${label} ${STAMP}`;
-
 // ---------------------------------------------------------------- Scenarios
 
-async function scenarioFormDocuments(popup, page) {
+async function scenarioFormDocuments(R, popup, page, artifacts) {
   const forms = await (await L.api('/api/v1/forms?pageSize=50')).json();
   const form = (forms.forms || [])[0];
   if (!form) return R.info('A. no Form on this server, skipping Form scenarios');
@@ -52,9 +46,7 @@ async function scenarioFormDocuments(popup, page) {
 
   // The list was loaded before the document existed; the server search finds it anyway
   await popup.fill('#document-search', formDocName);
-  let selectorVisible = false;
-  try { await popup.locator('#field-selector-section').waitFor({ state: 'visible', timeout: 8000 }); selectorVisible = true; } catch {}
-  R.ok('A2. typing the exact name of a Form document shows the field selector', selectorVisible);
+  R.ok('A2. typing the exact name of a Form document shows the field selector', await L.appears(popup.locator('#field-selector-section'), 8000));
   const options = await popup.locator('#field-select option').allTextContents();
   R.ok('A3. only TEXT fields are offered', JSON.stringify(options) === JSON.stringify(textFields), `offered: ${options.join(' | ')}`);
   await popup.screenshot({ path: path.join(artifacts, 'A-field-selector.png') });
@@ -70,34 +62,29 @@ async function scenarioFormDocuments(popup, page) {
   R.ok('A5. content landed in the chosen field only', targetField && targetField.content.includes('First paragraph') && otherText.every((f) => !(f.content || '').includes('First paragraph')));
   R.ok('A6. field selector still shown after the clip', await popup.locator('#field-selector-section').isVisible());
 
-  await popup.click('label[for="type-url"]');
+  await L.selectType(popup, 'url-only');
   R.ok('A7. field selector persists when switching content type', await popup.locator('#field-selector-section').isVisible());
 
   await popup.fill('#document-search', formDocName.slice(0, 10));
-  const t0 = Date.now();
-  let hidden = false;
-  try { await popup.locator('#field-selector-section').waitFor({ state: 'hidden', timeout: 5000 }); hidden = true; } catch {}
-  R.ok('A8. editing the search box to a non-match hides the field selector', hidden, `${Date.now() - t0} ms`);
+  R.ok('A8. editing the search box to a non-match hides the field selector', await L.appears(popup.locator('#field-selector-section'), 5000, 'hidden'));
 
   // Simulate a Form with no TEXT fields
   await popup.evaluate(() => {
-    window.__realSend = sendMessageAsync;
-    sendMessageAsync = async (msg) => msg.action === 'getDocumentFields'
-      ? { success: true, isFormDoc: true, fields: [{ id: 1, name: 'Only string', type: 'STRING' }, { id: 2, name: 'A number', type: 'NUMBER' }] }
+    window.__realSend = chrome.runtime.sendMessage;
+    chrome.runtime.sendMessage = async (msg) => msg.action === 'getDocumentFields'
+      ? { success: true, fields: [{ id: 1, name: 'Only string', type: 'STRING' }, { id: 2, name: 'A number', type: 'NUMBER' }] }
       : window.__realSend(msg);
   });
   await popup.fill('#document-search', formDocName);
-  let incompatible = false;
-  try { await popup.locator('#no-compatible-fields-msg').waitFor({ state: 'visible', timeout: 5000 }); incompatible = true; } catch {}
-  R.ok('A9. Form with no text fields shows the incompatible message and disables Save', incompatible && (await popup.locator('#clip-btn').isDisabled()));
+  R.ok('A9. Form with no text fields shows the incompatible message and disables Save', await L.appears(popup.locator('#no-compatible-fields-msg')) && (await popup.locator('#clip-btn').isDisabled()));
   await popup.screenshot({ path: path.join(artifacts, 'A-no-compatible-fields.png') });
-  await popup.evaluate(() => { sendMessageAsync = window.__realSend; });
+  await popup.evaluate(() => { chrome.runtime.sendMessage = window.__realSend; });
   await popup.fill('#document-search', '');
-  await popup.waitForTimeout(400);
+  await L.appears(popup.locator('#field-selector-section'), 5000, 'hidden');
   R.ok('A10. clearing the search re-enables Save', !(await popup.locator('#clip-btn').isDisabled()));
 }
 
-async function scenarioHostileInputs(popup, page) {
+async function scenarioHostileInputs(R, popup, page, origin) {
   const hostile = `${PREFIX}<img src=x onerror=alert(1)> "quotes" & ünïcödé 🧪 ${STAMP}`;
   await L.selectText(page, '#p2');
   let s = await L.clip(popup, { type: 'selection', docName: hostile, note: 'hostile name' });
@@ -105,8 +92,7 @@ async function scenarioHostileInputs(popup, page) {
   const d = await L.docByName(hostile);
   if (d) {
     await popup.fill('#document-search', 'ünïcödé');
-    await popup.waitForTimeout(800);
-    R.ok('B2. hostile name is rendered as text in the list (no img element)', (await popup.locator('.document-item', { hasText: 'ünïcödé' }).count()) >= 1 && (await popup.locator('.document-item img').count()) === 0);
+    R.ok('B2. hostile name is rendered as text in the list (no img element)', await L.appears(popup.locator('.document-item', { hasText: 'ünïcödé' })) && (await popup.locator('.document-item img').count()) === 0);
     R.info('B2. stored name as returned by the API', JSON.stringify(d.name));
   }
 
@@ -123,12 +109,11 @@ async function scenarioHostileInputs(popup, page) {
   const caseName = name('Case Test');
   await L.clip(popup, { type: 'url-only', docName: caseName });
   await L.clip(popup, { type: 'url-only', docName: caseName.toLowerCase() });
-  const recent = await (await L.api('/api/v1/documents?pageSize=20&orderBy=lastModified%20desc')).json();
-  const sameName = (recent.documents || []).filter((d) => d.name.toLowerCase() === caseName.toLowerCase());
+  const sameName = (await L.recentDocuments(20)).filter((d) => d.name.toLowerCase() === caseName.toLowerCase());
   R.ok('B7. a name differing only in case reuses the existing document', sameName.length === 1, `${sameName.length} document(s)`);
 }
 
-async function scenarioContentFidelity(popup, page) {
+async function scenarioContentFidelity(R, popup, page, origin, artifacts) {
   const docName = name('content');
   await L.selectText(page, 'main');
   const s = await L.clip(popup, { type: 'selection', docName, note: 'note with <b>html</b> & "quotes"' });
@@ -138,12 +123,12 @@ async function scenarioContentFidelity(popup, page) {
   const content = (await L.docContent(d.id)).fields[0].content;
   fs.writeFileSync(path.join(artifacts, 'C-content.html'), content);
   R.ok('C2. note HTML is escaped, not rendered', content.includes('&lt;b&gt;html&lt;/b&gt;') && !content.includes('<b>html</b>'));
-  R.ok('C3. relative link made absolute', content.includes(`href="${TEST_ORIGIN}/rel"`));
+  R.ok('C3. relative link made absolute', content.includes(`href="${origin}/rel"`));
   R.ok('C4. data: image kept (image data URIs are allowed)', /<img[^>]+src="data:image\/gif/.test(content));
   R.ok('C5. inline formatting preserved', /<b>Bold<\/b>/.test(content) && /<code>code<\/code>/.test(content));
 }
 
-async function scenarioDoubleClick(popup) {
+async function scenarioDoubleClick(R, popup) {
   const docName = name('double');
   await L.clip(popup, { type: 'url-only', docName });
   const d = await L.docByName(docName);
@@ -151,21 +136,19 @@ async function scenarioDoubleClick(popup) {
   const before = await count();
   await popup.evaluate(() => { const b = document.getElementById('clip-btn'); b.click(); b.click(); b.click(); });
   await L.waitForStatus(popup, 30000);
-  await popup.waitForTimeout(2000);
+  await L.appears(popup.locator('.document-item.selected', { hasText: docName }));
   R.ok('D1. triple click on Save appends exactly one clip', (await count()) === before + 1, `before ${before}, after ${await count()}`);
 }
 
-async function scenarioScrollAndKeyboard(popup) {
+async function scenarioScrollAndKeyboard(R, popup) {
   await popup.fill('#document-search', '');
-  await popup.waitForTimeout(400);
   const initial = await popup.locator('.document-item').count();
   let count = initial;
   for (let i = 0; i < 8; i++) {
     await popup.evaluate(() => { const s = document.querySelector('.document-section'); s.scrollTop = s.scrollHeight; });
-    await popup.waitForTimeout(800);
-    const now = await popup.locator('.document-item').count();
-    if (now === count) break;
-    count = now;
+    const grew = await popup.waitForFunction((n) => document.querySelectorAll('.document-item').length > n, count, { timeout: 3000 }).then(() => true, () => false);
+    if (!grew) break;
+    count = await popup.locator('.document-item').count();
   }
   const total = (await (await L.api('/api/v1/documents?pageSize=1')).json()).totalHits;
   R.ok('E1. infinite scroll loads further pages', count > initial, `${initial} -> ${count} items (server has ${total})`);
@@ -179,17 +162,15 @@ async function scenarioScrollAndKeyboard(popup) {
   R.info('E3. Tab from the search box focuses', focused || 'nothing');
   if (focused && focused.includes('document-item')) {
     await popup.keyboard.press('Enter');
-    await popup.waitForTimeout(300);
-    R.ok('E4. Enter on a focused list item selects it', (await popup.locator('.document-item.selected').count()) === 1 && (await popup.inputValue('#document-search')).length > 0);
+    R.ok('E4. Enter on a focused list item selects it', await L.appears(popup.locator('.document-item.selected')) && (await popup.inputValue('#document-search')).length > 0);
   }
 }
 
-async function scenarioExternalSites(ext) {
+async function scenarioExternalSites(R, ext, artifacts) {
   for (const site of EXTERNAL) {
     let page, tab;
     try {
       ({ page, tab } = await L.openTab(ext, R, site.url, site.name));
-      await page.waitForTimeout(1500);
     } catch (e) {
       R.info(`F. ${site.name} unreachable, skipped`, e.message.split('\n')[0]);
       if (page) await page.close();
@@ -213,46 +194,38 @@ async function scenarioExternalSites(ext) {
       fs.writeFileSync(path.join(artifacts, `F-${slug}.html`), content);
       const clips = (content.match(/Clipped from/g) || []).length;
       R.ok(`F4. ${site.name}: all three clips in one document`, clips === 2 && /PDF clipped from/.test(content), `${clips} HTML clips, ${Math.round(content.length / 1024)} KB, scripts: ${(content.match(/<script/gi) || []).length}, on* attrs: ${(content.match(/\son\w+=/gi) || []).length}`);
-      const pdf = await L.latestPdf('');
-      if (pdf) {
-        const bytes = await L.downloadFile(pdf.id);
-        fs.writeFileSync(path.join(artifacts, `F-${slug}.pdf`), bytes);
-        R.info(`F5. ${site.name}: PDF`, `${L.inspectPdf(bytes).pages} pages, ${Math.round(bytes.length / 1024)} KB, "${pdf.name}"`);
-      }
+      const report = await L.fetchPdfReport('', path.join(artifacts, `F-${slug}.pdf`));
+      if (report) R.info(`F5. ${site.name}: PDF "${report.pdf.name}"`, report.describe);
     }
     await popup.close();
     await page.close();
   }
 }
 
-async function scenarioSessionLoss(ext, popup, testTab) {
-  await popup.evaluate(() => chrome.storage.session.set({ accessToken: 'revoked-key' }));
-  await popup.click('label[for="type-url"]');
+async function scenarioSessionLoss(R, ext, popup, testTab, artifacts) {
+  // The worker caches credentials after the first read, so log out first and then plant a
+  // bad key in session storage: the next request reads it and the server answers 401
+  await popup.evaluate((url) => chrome.runtime.sendMessage({ action: 'logout' }).then(() => chrome.storage.session.set({ serverUrl: url, accessToken: 'revoked-key' })), L.RSPACE_URL);
+  await L.selectType(popup, 'url-only');
   await popup.fill('#document-search', name('expired'));
-  await popup.waitForTimeout(600);
+  await L.appears(popup.locator('#create-hint'));
   await popup.click('#clip-btn');
-  let authShown = false;
-  try { await popup.locator('#auth-screen').waitFor({ state: 'visible', timeout: 10000 }); authShown = true; } catch {}
+  const authShown = await L.appears(popup.locator('#auth-screen'), 10000);
   R.ok('H1. clipping with a revoked key returns to the connect screen', authShown, authShown ? (await popup.locator('#auth-error').textContent()).trim() : '');
   await popup.screenshot({ path: path.join(artifacts, 'H-expired.png') });
-  R.ok('H2. a popup opened afterwards shows the connect screen', await (async () => {
-    const p = await L.openPopup(ext, R, testTab);
-    await p.waitForTimeout(1500);
-    const auth = await p.locator('#auth-screen').isVisible();
-    await p.close();
-    return auth;
-  })());
+  const p = await L.openPopup(ext, R, testTab);
+  R.ok('H2. a popup opened afterwards shows the connect screen', await L.appears(p.locator('#auth-screen')));
+  await p.close();
   R.ok('H3. reconnecting works', await L.connect(popup));
 }
 
-async function scenarioUnreachable(popup) {
-  await popup.evaluate(() => chrome.storage.session.set({ serverUrl: 'http://127.0.0.1:9' }));
+async function scenarioUnreachable(R, popup) {
+  await popup.evaluate(() => chrome.runtime.sendMessage({ action: 'logout' }).then(() => chrome.storage.session.set({ serverUrl: 'http://127.0.0.1:9', accessToken: 'k' })));
   const s = await L.clip(popup, { type: 'url-only', docName: name('offline'), timeoutMs: 45000 });
   R.ok('I1. unreachable server produces a clear error, not a hang', !s.ok && /reach/i.test(s.text), `${s.text} after ${s.ms} ms`);
-  await popup.evaluate((u) => chrome.storage.session.set({ serverUrl: u }), L.RSPACE_URL);
 }
 
-async function scenarioSearchQueries(popup) {
+async function scenarioSearchQueries(R, popup) {
   for (const q of ['🧪', '"quotes"', 'a & b', 'ünïcödé']) {
     const r = await popup.evaluate((query) => chrome.runtime.sendMessage({ action: 'getDocuments', pageNumber: 0, query }), q);
     R.info(`J. server search for ${JSON.stringify(q)}`, r && r.success ? `${r.documents.length} results` : `error: ${r && r.error}`);
@@ -261,38 +234,31 @@ async function scenarioSearchQueries(popup) {
 
 // ---------------------------------------------------------------- Main
 
-(async () => {
-  const server = await L.startTestServer(TEST_PORT, (req, res) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(TEST_PAGE); });
-  let ext;
-  try {
-    ext = await L.launchExtension(R, [TEST_ORIGIN, ...EXTERNAL.map((e) => e.origin)]);
-    const { page, tab } = await L.openTab(ext, R, `${TEST_ORIGIN}/`);
+L.runHarness({
+  name: 'explore',
+  port: 8766,
+  serve: (req, res) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(TEST_PAGE); },
+  origins: EXTERNAL.map((e) => e.origin),
+  prefix: PREFIX,
+  async body({ ext, R, artifacts, origin }) {
+    const { page, tab } = await L.openTab(ext, R, `${origin}/`);
     const popup = await L.openPopup(ext, R, tab);
     R.ok('connected', await L.connect(popup));
 
-    // EXPLORE_ONLY=ABC runs only the listed scenario letters
     const scenarios = {
-      A: () => scenarioFormDocuments(popup, page),
-      B: () => scenarioHostileInputs(popup, page),
-      C: () => scenarioContentFidelity(popup, page),
-      D: () => scenarioDoubleClick(popup),
-      E: () => scenarioScrollAndKeyboard(popup),
-      F: () => scenarioExternalSites(ext),
-      J: () => scenarioSearchQueries(popup),
-      H: () => scenarioSessionLoss(ext, popup, tab),
-      I: () => scenarioUnreachable(popup),
+      A: () => scenarioFormDocuments(R, popup, page, artifacts),
+      B: () => scenarioHostileInputs(R, popup, page, origin),
+      C: () => scenarioContentFidelity(R, popup, page, origin, artifacts),
+      D: () => scenarioDoubleClick(R, popup),
+      E: () => scenarioScrollAndKeyboard(R, popup),
+      F: () => scenarioExternalSites(R, ext, artifacts),
+      J: () => scenarioSearchQueries(R, popup),
+      H: () => scenarioSessionLoss(R, ext, popup, tab, artifacts),
+      I: () => scenarioUnreachable(R, popup),
     };
     const only = process.env.EXPLORE_ONLY;
     for (const [letter, run] of Object.entries(scenarios)) {
       if (!only || only.includes(letter)) await run();
     }
-  } catch (e) {
-    R.ok('harness', false, e.message);
-  } finally {
-    const { deleted, total } = await L.deleteDocumentsByPrefix(PREFIX);
-    R.ok(`cleanup: deleted ${deleted}/${total} test documents`, deleted === total);
-    if (ext) await ext.close();
-    server.close();
-  }
-  process.exit(R.summary(artifacts) ? 1 : 0);
-})();
+  },
+});

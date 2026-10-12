@@ -256,15 +256,15 @@ const PDF_CONFIG = {
   // Layout settings
   MARGIN_MM: 10,                      // Page margins in millimeters
   MAX_PAGES: 50,                      // Refuse pages that would need more PDF pages than this
+  MAX_CHUNK_PX: 15000,                // Tallest canvas rendered in one html2canvas call
 };
 
 /**
  * Generate a PDF of the current page using html2canvas and jsPDF.
  *
- * The page is rendered one PDF page at a time: each slice of the document that fits the
- * printable area is captured into its own canvas and added as one PDF page. Rendering the
- * whole document into a single canvas (the previous approach) hit the browser's canvas size
- * limit on long pages, which produced blank pages, and held the entire page bitmap in memory.
+ * The document is rendered in chunks of a few PDF pages each, kept under the browser's canvas
+ * size limit, and every page is cut out of its chunk. Rendering the whole document into one
+ * canvas (the original approach) produced blank pages on long documents.
  *
  * @returns {Promise<{success: boolean, pdfData?: string, error?: string}>}
  */
@@ -299,42 +299,55 @@ async function printPageToPdf() {
       throw new Error(`Page is too long to save as PDF (${pageCount} pages, limit is ${PDF_CONFIG.MAX_PAGES}). Try the Selection or Full Page option instead.`);
     }
 
-    for (let page = 0; page < pageCount; page++) {
-      const y = page * sliceHeight;
-      const height = Math.min(sliceHeight, docHeight - y);
+    // html2canvas clones and lays out the whole document on every call, so render as many
+    // pages per call as fit under the canvas size limit and cut the pages out of that chunk.
+    const pagesPerChunk = Math.max(1, Math.floor(PDF_CONFIG.MAX_CHUNK_PX / sliceHeight));
+    const pageCanvas = document.createElement('canvas');
+    const ctx = pageCanvas.getContext('2d');
 
-      const canvas = await html2canvas(document.body, {
+    for (let page = 0; page < pageCount; page += pagesPerChunk) {
+      const chunkPages = Math.min(pagesPerChunk, pageCount - page);
+      const y = page * sliceHeight;
+      const chunk = await html2canvas(document.body, {
         scale: PDF_CONFIG.CANVAS_SCALE,
         useCORS: PDF_CONFIG.USE_CORS,
         logging: DEBUG,
         allowTaint: PDF_CONFIG.ALLOW_TAINT,
         backgroundColor: PDF_CONFIG.BACKGROUND_COLOR,
-        // Lay the clone out at the full document size so every slice sees the same layout...
+        // Lay the clone out at the full document size so every chunk sees the same layout...
         windowWidth: docWidth,
         windowHeight: docHeight,
-        // ...and crop the rendering to this page's slice, measured from the top of the document
+        // ...and crop the rendering to this chunk, measured from the top of the document
         x: 0,
         y,
         width: docWidth,
-        height,
+        height: Math.min(chunkPages * sliceHeight, docHeight - y),
         scrollX: 0,
         scrollY: 0
       });
 
-      const imgData = canvas.toDataURL('image/jpeg', PDF_CONFIG.JPEG_QUALITY);
-      const imgHeightMm = canvas.height * printableWidthMm / canvas.width;
+      for (let i = 0; i < chunkPages; i++) {
+        const sliceTop = i * sliceHeight;
+        const height = Math.min(sliceHeight, chunk.height - sliceTop);
+        if (height <= 0) break;
+        pageCanvas.width = chunk.width;
+        pageCanvas.height = height;
+        ctx.drawImage(chunk, 0, sliceTop, chunk.width, height, 0, 0, chunk.width, height);
 
-      if (page > 0) {
-        pdf.addPage();
+        // JPEG bytes go straight to jsPDF; a data URL would be base64-encoded and decoded again
+        const blob = await new Promise((resolve) => pageCanvas.toBlob(resolve, 'image/jpeg', PDF_CONFIG.JPEG_QUALITY));
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (page + i > 0) pdf.addPage();
+        pdf.addImage(bytes, 'JPEG', PDF_CONFIG.MARGIN_MM, PDF_CONFIG.MARGIN_MM, printableWidthMm, height * printableWidthMm / chunk.width);
+        log(`Rendered page ${page + i + 1}/${pageCount}`);
       }
-      pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, PDF_CONFIG.MARGIN_MM, printableWidthMm, imgHeightMm);
 
-      // Release the slice bitmap before rendering the next one
-      canvas.width = 0;
-      canvas.height = 0;
-
-      log(`Rendered page ${page + 1}/${pageCount}`);
+      // Release the chunk bitmap before rendering the next one
+      chunk.width = 0;
+      chunk.height = 0;
     }
+    pageCanvas.width = 0;
+    pageCanvas.height = 0;
 
     const pdfData = pdf.output('dataurlstring');
     log(`PDF generated successfully, ${pageCount} pages, size: ${Math.round(pdfData.length / 1024)} KB`);

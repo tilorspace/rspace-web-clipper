@@ -1,5 +1,5 @@
 // Popup for RSpace Web Clipper.
-// config.js (CONFIG, log, logError) is loaded before this file by popup.html.
+// config.js (CONFIG, logError) is loaded before this file by popup.html.
 
 // ---------------------------------------------------------------- State
 //
@@ -9,18 +9,21 @@
 let selectedDocument = null;   // { id, globalId, name } | null
 let selectedField = null;      // { id, name, type } for Form documents, otherwise null
 let currentDocFields = null;   // all fields of a selected Form document, otherwise null
-let saveBlocked = false;       // true when the selected Form document has no compatible field
+let saving = false;
 
 let documents = [];            // documents loaded so far (newest first)
 let currentPage = 0;
 let hasMoreDocuments = true;
-let isLoadingMore = false;
 let searchTimeout = null;
-let searchSequence = 0;        // ignores server search responses for an older query
+let serverUrl = null;          // of the current session, for "View" links
 
 const elements = {};
+const bannerTimers = {};
 const AUTH_STORAGE_KEYS = ['savedServerUrl', 'savedApiKey', 'apiKeyExpiresAt', 'rememberServer', 'rememberApiKey'];
 const API_KEY_EXPIRY_MS = CONFIG.STORAGE.API_KEY_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+
+/** Thrown by callWorker after the popup has already switched to the connect screen. */
+class SessionExpired extends Error {}
 
 document.addEventListener('DOMContentLoaded', async () => {
   cacheElements();
@@ -40,9 +43,9 @@ function cacheElements() {
 
 function setupEventListeners() {
   elements.connectBtn.addEventListener('click', handleConnect);
-  elements.backBtn.addEventListener('click', () => { elements.backBtn.style.display = 'none'; showScreen('clipper-screen'); });
+  elements.backBtn.addEventListener('click', () => showScreen('clipper-screen'));
   elements.clearDataBtn.addEventListener('click', handleClearSavedData);
-  elements.settingsBtn.addEventListener('click', handleSettings);
+  elements.settingsBtn.addEventListener('click', () => showAuthScreen({ back: true }));
   elements.clipBtn.addEventListener('click', handleSave);
 
   elements.documentSearch.addEventListener('input', () => { updateSearchClearButton(); handleDocumentSearch(); });
@@ -55,40 +58,62 @@ function setupEventListeners() {
   });
   elements.documentSection.addEventListener('scroll', handleInfiniteScroll);
 
+  // One delegated handler for the document list instead of two listeners per item
+  const onItem = (e) => {
+    const item = e.target.closest('.document-item');
+    if (!item || (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    const doc = documents.find((d) => d.id === Number(item.dataset.id));
+    if (doc) setSelectedDocument(doc);
+  };
+  elements.documentList.addEventListener('click', onItem);
+  elements.documentList.addEventListener('keydown', onItem);
+
   document.querySelectorAll('input[name="content-type"]').forEach((radio) => {
     radio.addEventListener('change', () => { if (currentDocFields) updateFieldSelector(); });
   });
   elements.fieldSelect.addEventListener('change', () => {
     const id = parseInt(elements.fieldSelect.value, 10);
     selectedField = (currentDocFields || []).find((f) => f.id === id) || null;
+    updateSaveButton();
   });
+}
+
+/**
+ * Send a message to the worker. If the session is gone the popup switches to the connect
+ * screen here, once, and the caller is unwound with SessionExpired.
+ */
+async function callWorker(message) {
+  const response = await chrome.runtime.sendMessage(message);
+  if (response && response.code === 'NOT_AUTHENTICATED') {
+    await showAuthScreen({ expired: true });
+    throw new SessionExpired();
+  }
+  return response;
 }
 
 // ---------------------------------------------------------------- Auth screen
 
 async function checkAuthStatus() {
   try {
-    const session = await chrome.storage.session.get(['serverUrl', 'accessToken']);
+    const session = await chrome.storage.session.get(['serverUrl', 'accessToken', 'lastClipResult']);
     if (session.accessToken && session.serverUrl) {
+      serverUrl = session.serverUrl;
       showScreen('clipper-screen');
-      await showPendingClipResult(session.serverUrl);
-      await loadDocuments();
+      const loading = loadDocuments();
+      await showPendingClipResult(session.lastClipResult);
+      await loading;
       return;
     }
   } catch (error) {
     logError('Error checking auth status:', error);
   }
-  await fillAuthForm();
-  elements.backBtn.style.display = 'none';
-  showScreen('auth-screen');
+  await showAuthScreen();
 }
 
-/** Pre-fill the connect form from persistent storage (remembered URL and, if opted in, key). */
-async function fillAuthForm() {
-  elements.connectBtn.disabled = false;
-  elements.connectBtn.textContent = 'Connect to RSpace';
+/** Show the connect form, pre-filled from persistent storage (remembered URL and, if opted in, key). */
+async function showAuthScreen({ back = false, expired = false } = {}) {
   elements.authError.classList.remove('show');
-
   const stored = await chrome.storage.local.get(AUTH_STORAGE_KEYS);
 
   const url = stored.rememberServer !== false ? validateStoredUrl(stored.savedServerUrl) : null;
@@ -101,49 +126,38 @@ async function fillAuthForm() {
   }
   elements.apiKey.value = keyValid ? stored.savedApiKey : '';
   elements.rememberApiKey.checked = !!keyValid;
-}
 
-async function handleSettings() {
-  await fillAuthForm();
-  elements.backBtn.style.display = 'block';
+  elements.backBtn.style.display = back ? 'block' : 'none';
   showScreen('auth-screen');
-}
-
-/** The session is gone or was rejected: go back to the connect screen. */
-async function handleNotAuthenticated() {
-  await chrome.storage.session.clear();
-  await fillAuthForm();
-  elements.backBtn.style.display = 'none';
-  showScreen('auth-screen');
-  showError('auth-error', 'Your session has expired. Please reconnect.');
+  if (expired) showError('auth-error', 'Your session has expired. Please reconnect.');
 }
 
 async function handleConnect() {
-  let serverUrl = elements.serverUrl.value.trim();
+  let url = elements.serverUrl.value.trim();
   const apiKey = elements.apiKey.value.trim();
 
-  if (!serverUrl || serverUrl === 'https://') return showError('auth-error', 'Please enter your RSpace server URL');
-  if (serverUrl.length > CONFIG.LIMITS.MAX_SERVER_URL_LENGTH) return showError('auth-error', 'Server URL is too long');
+  if (!url || url === 'https://') return showError('auth-error', 'Please enter your RSpace server URL');
+  if (url.length > CONFIG.LIMITS.MAX_SERVER_URL_LENGTH) return showError('auth-error', 'Server URL is too long');
   if (!apiKey) return showError('auth-error', 'Please enter your API key');
 
   // Accept a bare host name; https:// is the default scheme
-  if (!/^https?:\/\//i.test(serverUrl)) serverUrl = 'https://' + serverUrl;
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
 
-  let url;
+  let parsed;
   try {
-    url = new URL(serverUrl);
+    parsed = new URL(url);
   } catch (error) {
     return showError('auth-error', 'Invalid server URL format. Please enter a valid URL (e.g., https://your-server.com)');
   }
-  if (url.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(url.hostname)) {
+  if (parsed.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(parsed.hostname)) {
     return showError('auth-error', 'HTTPS is required for security. HTTP connections are not allowed for remote servers.');
   }
-  const normalizedUrl = serverUrl.replace(/\/$/, '');
-  elements.serverUrl.value = normalizedUrl;
+  url = url.replace(/\/$/, '');
+  elements.serverUrl.value = url;
 
   // Ask only for access to this server, nothing else
   try {
-    const granted = await chrome.permissions.request({ origins: [`${url.origin}/*`] });
+    const granted = await chrome.permissions.request({ origins: [`${parsed.origin}/*`] });
     if (!granted) return showError('auth-error', 'Permission required to connect to your RSpace server. Please allow access when prompted.');
   } catch (error) {
     logError('Permission request error:', error);
@@ -155,16 +169,15 @@ async function handleConnect() {
   elements.authError.classList.remove('show');
 
   try {
-    await chrome.storage.session.clear();
     // Forget any previously saved key; a new one is stored only after the server accepts it
     await chrome.storage.local.remove(['savedApiKey', 'apiKeyExpiresAt', 'rememberApiKey']);
     if (elements.rememberServer.checked) {
-      await chrome.storage.local.set({ savedServerUrl: normalizedUrl, rememberServer: true });
+      await chrome.storage.local.set({ savedServerUrl: url, rememberServer: true });
     } else {
       await chrome.storage.local.remove(['savedServerUrl', 'rememberServer']);
     }
 
-    const response = await sendMessageAsync({ action: 'startAuth', serverUrl: normalizedUrl, apiKey });
+    const response = await chrome.runtime.sendMessage({ action: 'startAuth', serverUrl: url, apiKey });
     if (!response || !response.success) {
       elements.apiKey.value = '';
       throw new Error(response?.error || 'Authentication failed');
@@ -173,11 +186,11 @@ async function handleConnect() {
     if (elements.rememberApiKey.checked) {
       await chrome.storage.local.set({ savedApiKey: apiKey, apiKeyExpiresAt: Date.now() + API_KEY_EXPIRY_MS, rememberApiKey: true });
     }
-    elements.backBtn.style.display = 'none';
+    serverUrl = url;
     showScreen('clipper-screen');
     await loadDocuments();
   } catch (error) {
-    showError('auth-error', error.message);
+    if (!(error instanceof SessionExpired)) showError('auth-error', error.message);
   } finally {
     elements.connectBtn.disabled = false;
     elements.connectBtn.textContent = 'Connect to RSpace';
@@ -188,9 +201,9 @@ async function handleConnect() {
 async function handleClearSavedData() {
   try {
     await chrome.storage.local.remove(AUTH_STORAGE_KEYS);
-    const response = await sendMessageAsync({ action: 'logout' });
+    const response = await chrome.runtime.sendMessage({ action: 'logout' });
     if (!response || !response.success) throw new Error('Background worker did not confirm logout');
-    await fillAuthForm();
+    await showAuthScreen();
     showError('auth-error', 'All saved data cleared and logged out successfully');
   } catch (error) {
     logError('Error clearing saved data:', error);
@@ -229,7 +242,7 @@ async function handleSave() {
 
   setBusy(isPdf ? 'Generating PDF...' : 'Saving...');
   try {
-    const [tab] = await queryTabsAsync({ active: true, currentWindow: true });
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) return failSave('No active tab found. Please try again.');
 
     try {
@@ -251,7 +264,7 @@ async function handleSave() {
     if (!isPdf) {
       let content;
       try {
-        content = await sendTabMessageAsync(tab.id, { action: 'getContent', contentType });
+        content = await chrome.tabs.sendMessage(tab.id, { action: 'getContent', contentType });
       } catch (error) {
         logError('Content extraction error:', error);
         return failSave('Failed to extract content from page.');
@@ -264,14 +277,10 @@ async function handleSave() {
       message.content = content;
     }
 
-    const response = await sendMessageAsync(message);
+    const response = await callWorker(message);
     // The worker stored this result for a popup that might have been closed; we are showing it now
     await chrome.storage.session.remove('lastClipResult');
-
-    if (!response || !response.success) {
-      if (response && response.error === 'Not authenticated') return handleNotAuthenticated();
-      return failSave(response?.error || 'Failed to save');
-    }
+    if (!response || !response.success) return failSave(response?.error || 'Failed to save');
 
     // Reload the list and keep the document selected, so another Save appends to it instead
     // of creating a duplicate. This happens while the loading screen is still up, so the user
@@ -279,12 +288,13 @@ async function handleSave() {
     await loadDocuments();
     const saved = documents.find((d) => d.id === response.documentId)
       || { id: response.documentId, globalId: response.globalId, name: docName };
-    await setSelectedDocument(saved);
+    setSelectedDocument(saved, response.fields);
 
     elements.note.value = '';
     showScreen('clipper-screen');
-    await showSuccessWithLink(isPdf ? 'PDF saved successfully!' : 'Content saved successfully!', response.globalId);
+    showSuccessWithLink(isPdf ? 'PDF saved successfully!' : 'Content saved successfully!', response.globalId);
   } catch (error) {
+    if (error instanceof SessionExpired) return;
     logError('Save error:', error);
     failSave('An unexpected error occurred: ' + error.message);
   } finally {
@@ -293,9 +303,18 @@ async function handleSave() {
 }
 
 function setBusy(label) {
-  elements.clipBtn.disabled = !!label || saveBlocked;
+  saving = !!label;
+  updateSaveButton(label);
+  if (label) {
+    hideBanners();
+    showScreen('loading-screen');
+  }
+}
+
+/** Save is disabled while saving and while a Form document has no usable field. */
+function updateSaveButton(label) {
+  elements.clipBtn.disabled = saving || (!!currentDocFields && !selectedField);
   elements.clipBtn.textContent = label || 'Save to RSpace';
-  if (label) showScreen('loading-screen');
 }
 
 function failSave(message) {
@@ -312,7 +331,7 @@ async function ensureContentScriptInjected(tabId, includePdfLibs) {
   let contentScriptPresent = false;
   let pdfLibsPresent = false;
   try {
-    const response = await sendTabMessageAsync(tabId, { action: 'ping' });
+    const response = await chrome.tabs.sendMessage(tabId, { action: 'ping' });
     if (response && response.status === 'ready') {
       contentScriptPresent = true;
       pdfLibsPresent = response.pdfLibs === true;
@@ -330,20 +349,12 @@ async function ensureContentScriptInjected(tabId, includePdfLibs) {
 }
 
 /** Show the outcome of a clip that finished after the popup was closed. Shown once. */
-async function showPendingClipResult(serverUrl) {
-  try {
-    const { lastClipResult } = await chrome.storage.session.get('lastClipResult');
-    if (!lastClipResult) return;
-    await chrome.storage.session.remove('lastClipResult');
-    if (Date.now() - lastClipResult.at > 10 * 60 * 1000) return;
-    if (lastClipResult.success) {
-      await showSuccessWithLink(lastClipResult.message, lastClipResult.globalId, serverUrl);
-    } else {
-      showError('clip-error', lastClipResult.message);
-    }
-  } catch (error) {
-    logError('Could not read pending clip result:', error);
-  }
+async function showPendingClipResult(result) {
+  if (!result) return;
+  await chrome.storage.session.remove('lastClipResult');
+  if (Date.now() - result.at > 10 * 60 * 1000) return;
+  if (result.success) showSuccessWithLink(result.message, result.globalId);
+  else showError('clip-error', result.message);
 }
 
 // ---------------------------------------------------------------- Document list and search
@@ -354,34 +365,30 @@ async function loadDocuments(append = false) {
     documents = [];
     hasMoreDocuments = true;
   }
+  elements.loadingIndicator.style.display = append ? 'block' : 'none';
   try {
-    const response = await sendMessageAsync({ action: 'getDocuments', pageNumber: currentPage });
-    if (!response || !response.success) {
-      if (response && response.error === 'Not authenticated') return handleNotAuthenticated();
-      return showError('clip-error', response?.error || 'Failed to load documents');
-    }
+    const response = await callWorker({ action: 'getDocuments', pageNumber: currentPage });
+    if (!response || !response.success) return showError('clip-error', response?.error || 'Failed to load documents');
     documents = append ? mergeDocuments(documents, response.documents) : response.documents;
     hasMoreDocuments = response.hasMore;
     renderDocuments(documents);
     elements.emptyState.style.display = documents.length ? 'none' : 'block';
     elements.documentList.style.display = documents.length ? 'block' : 'none';
   } catch (error) {
+    if (error instanceof SessionExpired) return;
     logError('Load documents error:', error);
     showError('clip-error', 'Failed to load documents: ' + error.message);
+  } finally {
+    elements.loadingIndicator.style.display = 'none';
   }
 }
 
 async function handleInfiniteScroll() {
-  if (isLoadingMore || !hasMoreDocuments) return;
+  if (!hasMoreDocuments || elements.loadingIndicator.style.display === 'block') return;
   const s = elements.documentSection;
   if (s.scrollHeight - s.scrollTop - s.clientHeight > 100) return;
-
-  isLoadingMore = true;
-  elements.loadingIndicator.style.display = 'block';
   currentPage++;
   await loadDocuments(true);
-  elements.loadingIndicator.style.display = 'none';
-  isLoadingMore = false;
 }
 
 /** Merge two document lists, keeping the first occurrence of each id. */
@@ -408,10 +415,8 @@ function handleDocumentSearch() {
   clearTimeout(searchTimeout);
   searchTimeout = setTimeout(async () => {
     const query = elements.documentSearch.value.trim();
-    const sequence = ++searchSequence;
-
     if (!query) {
-      await setSelectedDocument(null);
+      setSelectedDocument(null);
       renderDocuments(documents);
       hideCreateHint();
       return;
@@ -420,26 +425,25 @@ function handleDocumentSearch() {
     let { exact, partial } = findMatches(query);
     if (!exact && query.length >= 2 && hasMoreDocuments) {
       try {
-        const response = await sendMessageAsync({ action: 'getDocuments', pageNumber: 0, query });
-        if (sequence !== searchSequence) return; // the user typed something else since
+        const response = await callWorker({ action: 'getDocuments', pageNumber: 0, query });
+        if (elements.documentSearch.value.trim() !== query) return; // the user typed on
         if (response && response.success) {
           documents = mergeDocuments(documents, response.documents);
           ({ exact, partial } = findMatches(query));
         }
       } catch (error) {
+        if (error instanceof SessionExpired) return;
         logError('Server search failed:', error);
       }
     }
 
     if (exact) {
-      if (!selectedDocument || selectedDocument.id !== exact.id) {
-        await setSelectedDocument(exact, { fillSearch: false });
-      }
+      if (!selectedDocument || selectedDocument.id !== exact.id) setSelectedDocument(exact);
     } else {
-      await setSelectedDocument(null);
+      setSelectedDocument(null);
+      showCreateHint();
     }
     renderDocuments(partial);
-    if (exact) hideCreateHint(); else showCreateHint();
   }, CONFIG.UI.SEARCH_DEBOUNCE_MS);
 }
 
@@ -460,37 +464,44 @@ function handleSearchEnter(e) {
 
 /**
  * The single place that changes which document a Save goes to. Highlights it in the list,
- * optionally writes its name into the search box, and loads its fields so Form documents
- * show the field selector. Passing null means "create a new document".
+ * writes its name into the search box (unless the box already names it), and loads its fields
+ * so Form documents show the field selector. Passing null means "create a new document".
+ * @param {Array} [fields] - the document's fields when already known, to skip the fetch
  */
-async function setSelectedDocument(doc, { fillSearch = true } = {}) {
+async function setSelectedDocument(doc, fields) {
   selectedDocument = doc;
   selectedField = null;
   currentDocFields = null;
   hideFieldSelector();
 
-  document.querySelectorAll('.document-item').forEach((item) => {
-    const on = !!doc && Number(item.dataset.id) === doc.id;
-    item.classList.toggle('selected', on);
-    item.setAttribute('aria-selected', String(on));
-  });
+  document.querySelectorAll('.document-item').forEach((item) => markSelected(item, !!doc && Number(item.dataset.id) === doc.id));
   if (!doc) return;
 
-  if (fillSearch) {
+  if (elements.documentSearch.value.trim().toLowerCase() !== doc.name.toLowerCase()) {
     elements.documentSearch.value = doc.name;
     updateSearchClearButton();
   }
   hideCreateHint();
 
   try {
-    const response = await sendMessageAsync({ action: 'getDocumentFields', documentId: doc.id });
-    // Ignore the answer if the selection moved on meanwhile
-    if (selectedDocument !== doc || !response || !response.success || !response.isFormDoc) return;
-    currentDocFields = response.fields;
-    updateFieldSelector();
+    if (!fields) {
+      const response = await callWorker({ action: 'getDocumentFields', documentId: doc.id });
+      // Ignore the answer if the selection moved on meanwhile
+      if (selectedDocument !== doc || !response || !response.success) return;
+      fields = response.fields;
+    }
+    if (fields.length > 1) {
+      currentDocFields = fields;
+      updateFieldSelector();
+    }
   } catch (error) {
-    logError('Error fetching document fields:', error);
+    if (!(error instanceof SessionExpired)) logError('Error fetching document fields:', error);
   }
+}
+
+function markSelected(item, on) {
+  item.classList.toggle('selected', on);
+  item.setAttribute('aria-selected', String(on));
 }
 
 function renderDocuments(docs) {
@@ -503,16 +514,7 @@ function renderDocuments(docs) {
     item.tabIndex = 0;
     item.setAttribute('role', 'button');
     item.setAttribute('aria-label', `Select document: ${doc.name}`);
-    const on = !!selectedDocument && selectedDocument.id === doc.id;
-    item.classList.toggle('selected', on);
-    item.setAttribute('aria-selected', String(on));
-    item.addEventListener('click', () => setSelectedDocument(doc));
-    item.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        setSelectedDocument(doc);
-      }
-    });
+    markSelected(item, !!selectedDocument && selectedDocument.id === doc.id);
     elements.documentList.appendChild(item);
   }
 }
@@ -535,14 +537,12 @@ function hideCreateHint() {
 /** Only text fields can hold clipped HTML, whatever the content type. */
 function updateFieldSelector() {
   const compatible = (currentDocFields || []).filter((f) => f.type && f.type.toUpperCase() === 'TEXT');
+  const blocked = compatible.length === 0;
   elements.fieldSelectorSection.style.display = 'block';
+  elements.fieldSelect.style.display = blocked ? 'none' : 'block';
+  elements.noCompatibleFieldsMsg.style.display = blocked ? 'block' : 'none';
+
   elements.fieldSelect.innerHTML = '';
-
-  saveBlocked = compatible.length === 0;
-  elements.fieldSelect.style.display = saveBlocked ? 'none' : 'block';
-  elements.noCompatibleFieldsMsg.style.display = saveBlocked ? 'block' : 'none';
-  elements.clipBtn.disabled = saveBlocked;
-
   for (const field of compatible) {
     const option = document.createElement('option');
     option.value = field.id;
@@ -550,72 +550,51 @@ function updateFieldSelector() {
     elements.fieldSelect.appendChild(option);
   }
   selectedField = compatible[0] || null;
+  updateSaveButton();
 }
 
 function hideFieldSelector() {
-  saveBlocked = false;
   elements.fieldSelectorSection.style.display = 'none';
   elements.fieldSelect.innerHTML = '';
   elements.noCompatibleFieldsMsg.style.display = 'none';
-  elements.clipBtn.disabled = false;
+  updateSaveButton();
 }
 
-// ---------------------------------------------------------------- Screens and messages
+// ---------------------------------------------------------------- Screens and banners
 
 function showScreen(screenId) {
   document.querySelectorAll('.screen').forEach((screen) => { screen.style.display = 'none'; });
   document.getElementById(screenId).style.display = screenId === 'clipper-screen' ? 'flex' : 'block';
 }
 
-function showError(elementId, message) {
-  const el = document.getElementById(elementId);
+/** Show a banner for a while; a newer banner on the same element restarts the timer. */
+function showBanner(el, message, ms) {
+  clearTimeout(bannerTimers[el.id]);
   el.textContent = message;
   el.classList.add('show');
-  setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
-  setTimeout(() => el.classList.remove('show'), CONFIG.UI.ERROR_DISPLAY_MS);
+  bannerTimers[el.id] = setTimeout(() => el.classList.remove('show'), ms);
 }
 
-async function showSuccessWithLink(message, globalId, serverUrl) {
-  if (!serverUrl) {
-    ({ serverUrl } = await chrome.storage.session.get('serverUrl'));
+function hideBanners() {
+  for (const el of [elements.clipError, elements.clipSuccess]) {
+    clearTimeout(bannerTimers[el.id]);
+    el.classList.remove('show');
   }
+}
+
+function showError(elementId, message) {
+  const el = document.getElementById(elementId);
+  showBanner(el, message, CONFIG.UI.ERROR_DISPLAY_MS);
+  setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+}
+
+function showSuccessWithLink(message, globalId) {
   const el = elements.clipSuccess;
-  el.textContent = message + ' ';
+  showBanner(el, message + ' ', CONFIG.UI.SUCCESS_DISPLAY_MS);
   const link = document.createElement('a');
   link.href = `${serverUrl}/globalId/${globalId}`;
   link.target = '_blank';
   link.textContent = 'View →';
   link.style.cssText = 'color: inherit; font-weight: 600; text-decoration: underline;';
   el.appendChild(link);
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), CONFIG.UI.SUCCESS_DISPLAY_MS);
-}
-
-// ---------------------------------------------------------------- Chrome API helpers
-
-function sendMessageAsync(message) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(response);
-    });
-  });
-}
-
-function queryTabsAsync(queryInfo) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.query(queryInfo, (tabs) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(tabs);
-    });
-  });
-}
-
-function sendTabMessageAsync(tabId, message) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response) => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(response);
-    });
-  });
 }

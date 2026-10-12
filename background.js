@@ -1,9 +1,9 @@
 // Background service worker for RSpace Web Clipper.
 // Handles authentication, RSpace API calls and content saving for the popup.
 //
-// Every message handler may throw. Errors are mapped to a user-facing response in one
-// place (failureResponse), so handlers only describe the happy path and raise ClipError
-// with a message meant for the user when something specific goes wrong.
+// Every message handler describes the happy path and throws on failure: ClipError carries a
+// message meant for the user, NotAuthenticated means the session is gone. handleMessage maps
+// every error to the response object the popup sees.
 
 importScripts('config.js');
 
@@ -13,13 +13,16 @@ class NotAuthenticated extends Error {}
 /** An error whose message is safe and useful to show to the user. */
 class ClipError extends Error {}
 
+// Credentials are read from session storage once and kept here until logout or a 401.
+let credentials = null;
+
 // Only one clip runs at a time; a second request while one is running shares its result.
 let clipInFlight = null;
 
 const MESSAGE_HANDLERS = {
   startAuth: (r) => handleAuth(r.serverUrl, r.apiKey),
-  logout: () => handleLogout(),
-  getDocuments: (r) => getDocuments(r.pageNumber || 0, r.query || ''),
+  logout: handleLogout,
+  getDocuments: (r) => getDocuments(r.pageNumber, r.query),
   getDocumentFields: (r) => getDocumentFields(r.documentId),
   clipContent: (r) => runClip(() => clipContent(r), 'Content saved successfully!'),
   clipPdf: (r) => runClip(() => clipPdf(r), 'PDF saved successfully!'),
@@ -30,14 +33,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return true;
 });
 
-/**
- * Dispatch a popup message to its handler and turn any thrown error into a response object.
- */
+/** Dispatch a popup message to its handler and turn any thrown error into a response object. */
 async function handleMessage(request) {
   const handler = request && MESSAGE_HANDLERS[request.action];
-  if (!handler) {
-    return { success: false, error: 'Unknown action' };
-  }
+  if (!handler) return { success: false, error: 'Unknown action' };
   try {
     return await handler(request);
   } catch (error) {
@@ -47,7 +46,7 @@ async function handleMessage(request) {
 
 function failureResponse(error) {
   logError('Request failed:', error);
-  if (error instanceof NotAuthenticated) return { success: false, error: 'Not authenticated' };
+  if (error instanceof NotAuthenticated) return { success: false, code: 'NOT_AUTHENTICATED', error: 'Not authenticated' };
   if (error instanceof ClipError) return { success: false, error: error.message };
   if (error.message === 'Request timeout') return { success: false, error: 'Request timeout. Please try again.' };
   if (error instanceof TypeError) return { success: false, error: 'Could not reach the RSpace server. Please check the server URL and your connection.' };
@@ -56,12 +55,19 @@ function failureResponse(error) {
 
 // ---------------------------------------------------------------- HTTP helpers
 
-function getHttpErrorMessage(response) {
+function getHttpErrorMessage(response, fallback = 'Request failed. Please try again.') {
   if (response.status === 403) return 'Permission denied. Check your access rights.';
   if (response.status === 404) return 'Not found on the server.';
   if (response.status === 429) return 'Too many requests. Please wait and try again.';
   if (response.status >= 500) return 'Server error. Please try again later.';
-  return 'Request failed. Please try again.';
+  return fallback;
+}
+
+/** Throw a user-facing ClipError for a failed response, logging the server's own text. */
+async function ensureOk(response, fallback) {
+  if (response.ok) return response;
+  logError('API error', response.status, await response.text());
+  throw new ClipError(getHttpErrorMessage(response, fallback));
 }
 
 async function fetchWithTimeout(url, options = {}, timeout = CONFIG.API.REQUEST_TIMEOUT_MS) {
@@ -78,9 +84,17 @@ async function fetchWithTimeout(url, options = {}, timeout = CONFIG.API.REQUEST_
 }
 
 async function getCredentials() {
-  const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
-  if (!serverUrl || !accessToken) throw new NotAuthenticated();
-  return { serverUrl, accessToken };
+  if (!credentials) {
+    const { serverUrl, accessToken } = await chrome.storage.session.get(['serverUrl', 'accessToken']);
+    if (serverUrl && accessToken) credentials = { serverUrl, accessToken };
+  }
+  if (!credentials) throw new NotAuthenticated();
+  return credentials;
+}
+
+async function clearCredentials() {
+  credentials = null;
+  await chrome.storage.session.clear();
 }
 
 /**
@@ -94,7 +108,7 @@ async function apiFetch(path, options = {}, timeout = CONFIG.API.REQUEST_TIMEOUT
     headers: { apiKey: accessToken, ...(options.headers || {}) }
   }, timeout);
   if (response.status === 401) {
-    await chrome.storage.session.clear();
+    await clearCredentials();
     throw new NotAuthenticated();
   }
   return response;
@@ -108,62 +122,46 @@ function isValidId(value) {
 // ---------------------------------------------------------------- Auth
 
 async function handleAuth(serverUrl, apiKey) {
-  try {
-    const response = await fetchWithTimeout(`${serverUrl}/api/v1/status`, { headers: { apiKey } });
-    if (response.status === 401) return { success: false, error: 'Invalid API key' };
-    if (response.status === 404) return { success: false, error: 'Server endpoint not found. Please check the URL.' };
-    if (!response.ok) return { success: false, error: getHttpErrorMessage(response) };
+  const response = await fetchWithTimeout(`${serverUrl}/api/v1/status`, { headers: { apiKey } });
+  if (response.status === 401) throw new ClipError('Invalid API key');
+  if (response.status === 404) throw new ClipError('Server endpoint not found. Please check the URL.');
+  await ensureOk(response);
 
-    // Session storage is in memory and cleared when the browser closes
-    await chrome.storage.session.set({ serverUrl, accessToken: apiKey });
-    return { success: true };
-  } catch (error) {
-    logError('Auth error:', error);
-    if (error.message === 'Request timeout') {
-      return { success: false, error: 'Connection timeout. Please check your network and try again.' };
-    }
-    return { success: false, error: 'Could not connect to the server. Please check the URL and your connection.' };
-  }
+  // Session storage is in memory and cleared when the browser closes
+  credentials = { serverUrl, accessToken: apiKey };
+  await chrome.storage.session.set(credentials);
+  return { success: true };
 }
 
 async function handleLogout() {
-  await chrome.storage.session.clear();
+  await clearCredentials();
   return { success: true };
 }
 
 // ---------------------------------------------------------------- Documents
 
-/**
- * List the user's documents, newest first. `query` runs a server-side search.
- */
+/** List the user's documents, newest first. `query` runs a server-side search. */
 async function getDocuments(pageNumber = 0, query = '') {
   query = typeof query === 'string' ? query.trim().slice(0, 200) : '';
   const pageSize = CONFIG.API.DEFAULT_PAGE_SIZE;
   let path = `/api/v1/documents?pageSize=${pageSize}&pageNumber=${pageNumber}&orderBy=lastModified desc`;
   if (query) path += `&query=${encodeURIComponent(query)}`;
 
-  const response = await apiFetch(path);
-  if (!response.ok) {
-    return { success: false, error: getHttpErrorMessage(response), documents: [], hasMore: false };
-  }
-  const data = await response.json();
+  const data = await (await ensureOk(await apiFetch(path))).json();
   const documents = (data.documents || []).map((doc) => ({ id: doc.id, globalId: doc.globalId, name: doc.name }));
   const totalPages = Math.ceil((data.totalHits || documents.length) / pageSize);
   return { success: true, documents, hasMore: pageNumber + 1 < totalPages };
 }
 
-/**
- * Fields of a document, so the popup can offer a field choice for Form documents.
- */
+/** Fields of a document, so the popup can offer a field choice for Form documents. */
 async function getDocumentFields(documentId) {
-  if (!isValidId(documentId)) return { success: false, error: 'Invalid document id' };
+  if (!isValidId(documentId)) throw new ClipError('Invalid document id');
+  const doc = await (await ensureOk(await apiFetch(`/api/v1/documents/${documentId}`))).json();
+  return { success: true, fields: fieldSummary(doc.fields) };
+}
 
-  const response = await apiFetch(`/api/v1/documents/${documentId}`);
-  if (!response.ok) return { success: false, error: getHttpErrorMessage(response) };
-
-  const doc = await response.json();
-  const fields = (doc.fields || []).map((f) => ({ id: f.id, name: f.name, type: f.type }));
-  return { success: true, isFormDoc: fields.length > 1, fields };
+function fieldSummary(fields) {
+  return (fields || []).map((f) => ({ id: f.id, name: f.name, type: f.type }));
 }
 
 async function createDocument(title) {
@@ -172,17 +170,14 @@ async function createDocument(title) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: title, tags: 'web-clipper', fields: [{ content: '' }] })
   });
-  if (!response.ok) {
-    logError('Create document failed:', response.status, await response.text());
-    throw new ClipError(response.status === 403 ? 'Permission denied. Check your access rights.' : 'Unable to create document. Please try again.');
-  }
-  const doc = await response.json();
-  return { documentId: doc.id, globalId: doc.globalId };
+  const doc = await (await ensureOk(response, 'Unable to create document. Please try again.')).json();
+  return { documentId: doc.id, globalId: doc.globalId, fields: doc.fields };
 }
 
 /**
  * Validate the popup's request and resolve (or create) the document to write to.
- * @returns {Promise<{documentId: number, globalId: string}>}
+ * @returns {Promise<{documentId: number, globalId: string, fields?: Array}>} fields are known
+ *   for a freshly created document, saving a round trip in appendToField
  */
 async function resolveTargetDocument(request) {
   const targetDoc = request && request.targetDoc;
@@ -199,20 +194,19 @@ async function resolveTargetDocument(request) {
 }
 
 /**
- * Append HTML to one field of a document: GET the document, pick the field, PUT it back.
- * @param {number} documentId
+ * Append HTML to one field of a document and return the document's fields.
+ * @param {{documentId: number, fields?: Array}} target - fields, when known, skip the GET
  * @param {{id: number}|null} targetField - the field chosen in the popup (Form documents)
  * @param {string} html
  */
-async function appendToField(documentId, targetField, html) {
-  const getResponse = await apiFetch(`/api/v1/documents/${documentId}`);
-  if (!getResponse.ok) {
-    throw new ClipError(getResponse.status === 404 ? 'Document not found' : getHttpErrorMessage(getResponse));
+async function appendToField(target, targetField, html) {
+  let fields = target.fields;
+  if (!fields) {
+    const response = await apiFetch(`/api/v1/documents/${target.documentId}`);
+    fields = (await (await ensureOk(response, 'Document not found')).json()).fields;
   }
-  const fields = (await getResponse.json()).fields || [];
-  if (fields.length === 0) {
-    throw new ClipError('Document has no editable fields. Please select a different document.');
-  }
+  fields = fields || [];
+  if (fields.length === 0) throw new ClipError('Document has no editable fields. Please select a different document.');
 
   let field;
   if (targetField) {
@@ -224,15 +218,12 @@ async function appendToField(documentId, targetField, html) {
     throw new ClipError('This document has multiple fields. Please select a field to save to.');
   }
 
-  const putResponse = await apiFetch(`/api/v1/documents/${documentId}`, {
+  await ensureOk(await apiFetch(`/api/v1/documents/${target.documentId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fields: [{ id: field.id, content: (field.content || '') + html }] })
-  });
-  if (!putResponse.ok) {
-    logError('Update document failed:', putResponse.status, await putResponse.text());
-    throw new ClipError(getHttpErrorMessage(putResponse));
-  }
+  }));
+  return fields;
 }
 
 // ---------------------------------------------------------------- Clipping
@@ -256,7 +247,6 @@ function runClip(fn, successMessage) {
         lastClipResult: {
           success: !!result.success,
           message: result.success ? successMessage : result.error,
-          documentId: result.documentId || null,
           globalId: result.globalId || null,
           at: Date.now()
         }
@@ -273,19 +263,21 @@ function runClip(fn, successMessage) {
 async function clipContent(request) {
   const html = request.content && request.content.html;
   if (!html) throw new ClipError('Nothing to save');
-
-  const { documentId, globalId } = await resolveTargetDocument(request);
-  await appendToField(documentId, request.targetField, clipBlock(request, 'Clipped from', `<div>${sanitizeClippedHtml(html)}</div>`));
-  return { success: true, documentId, globalId };
+  const target = await resolveTargetDocument(request);
+  return finishClip(target, request, clipBlock(request, 'Clipped from', `<div>${sanitizeClippedHtml(html)}</div>`));
 }
 
 async function clipPdf(request) {
   const pdfData = await generatePdfFromTab(request.tabId);
-  const { documentId, globalId } = await resolveTargetDocument(request);
+  const target = await resolveTargetDocument(request);
   const fileId = await uploadPdf(pdfData, `${sanitizeFilename(request.sourceTitle || 'page')}.pdf`);
   // RSpace turns <fileId=N> into the attachment markup
-  await appendToField(documentId, request.targetField, clipBlock(request, 'PDF clipped from', `<p><fileId=${fileId}></p>`));
-  return { success: true, documentId, globalId };
+  return finishClip(target, request, clipBlock(request, 'PDF clipped from', `<p><fileId=${fileId}></p>`));
+}
+
+async function finishClip(target, request, html) {
+  const fields = await appendToField(target, request.targetField, html);
+  return { success: true, documentId: target.documentId, globalId: target.globalId, fields: fieldSummary(fields) };
 }
 
 /** Ask the content script (injected by the popup) to render the page to a PDF data URL. */
@@ -296,9 +288,7 @@ async function generatePdfFromTab(tabId) {
   } catch (error) {
     throw new ClipError('Failed to access page. Try refreshing the page.');
   }
-  if (!result || !result.pdfData) {
-    throw new ClipError((result && result.error) || 'Failed to generate PDF from page');
-  }
+  if (!result || !result.pdfData) throw new ClipError((result && result.error) || 'Failed to generate PDF from page');
   return result.pdfData;
 }
 
@@ -309,11 +299,7 @@ async function uploadPdf(pdfDataUrl, fileName) {
   formData.append('file', blob, fileName);
 
   const response = await apiFetch('/api/v1/files', { method: 'POST', body: formData }, CONFIG.API.UPLOAD_TIMEOUT_MS);
-  if (!response.ok) {
-    logError('File upload failed:', response.status, await response.text());
-    throw new ClipError('Failed to upload PDF file');
-  }
-  const data = await response.json();
+  const data = await (await ensureOk(response, 'Failed to upload PDF file')).json();
   const fileId = data.id || data.globalId?.match(/GL(\d+)/)?.[1] || data._links?.self?.match(/\/files\/(\d+)/)?.[1];
   if (!fileId) throw new ClipError('Failed to upload PDF file');
   return fileId;
@@ -321,24 +307,15 @@ async function uploadPdf(pdfDataUrl, fileName) {
 
 // ---------------------------------------------------------------- HTML building
 
-/**
- * The block appended to the document for every clip: source link, timestamp, optional note,
- * then the clip body.
- */
+/** The block appended to the document for every clip: source link, timestamp, note, body. */
 function clipBlock(request, label, bodyHtml) {
-  const safeUrl = escapeHtml(request.sourceUrl);
-  const safeTitle = escapeHtml(request.sourceTitle);
   const safeNote = escapeHtml(request.note);
-  const safeTimestamp = escapeHtml(formatTimestamp(new Date()));
-
   let html = '<div style="border-left: 3px solid #4a90e2; padding-left: 12px; margin: 20px 0;">';
-  html += `<p style="color: #666; font-size: 0.9em; margin: 0 0 8px 0;">${label} <a href="${safeUrl}">${safeTitle}</a> on ${safeTimestamp}</p>`;
+  html += `<p style="color: #666; font-size: 0.9em; margin: 0 0 8px 0;">${label} <a href="${escapeHtml(request.sourceUrl)}">${escapeHtml(request.sourceTitle)}</a> on ${escapeHtml(formatTimestamp(new Date()))}</p>`;
   if (safeNote) {
     html += `<p style="background: #fffde7; padding: 8px; border-radius: 4px; margin: 8px 0;"><strong>Note:</strong> ${safeNote}</p>`;
   }
-  html += bodyHtml;
-  html += '</div>';
-  return html;
+  return html + bodyHtml + '</div>';
 }
 
 function formatTimestamp(date) {
