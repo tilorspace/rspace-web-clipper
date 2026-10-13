@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "RSpace Web Clipper",
-  "version": "0.1",
+  "version": "0.2.0",
   "description": "Save web content directly into your RSpace documents",
   "permissions": [
     "activeTab",
     "scripting",
-    "storage",
-    "tabs"
+    "storage"
   ],
   "optional_host_permissions": [
     "https://*/*",

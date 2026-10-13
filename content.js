@@ -1,31 +1,39 @@
 // Content script - runs on web pages to extract content
+//
+// This file is injected on demand via chrome.scripting.executeScript. All injected files share
+// one isolated world, so running it twice would redeclare the top-level constants (a SyntaxError)
+// and register a second message listener. The guard below makes a repeat injection a no-op.
+(function () {
+if (window.__rspaceClipperLoaded) {
+  return;
+}
+window.__rspaceClipperLoaded = true;
 
 // Security: Disable all logging in production
 const DEBUG = false;
 const log = DEBUG ? console.log : () => {};
 const logError = DEBUG ? console.error : () => {};
 
-// Define valid content types for validation
-const VALID_CONTENT_TYPES = ['selection', 'full-page', 'url-only'];
+/**
+ * Whether the PDF libraries (injected separately by the popup) are present in this world.
+ * @returns {boolean}
+ */
+function pdfLibsLoaded() {
+  return typeof html2canvas !== 'undefined' && typeof jspdf !== 'undefined';
+}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   log('Content script received message:', request);
 
-  // Respond to ping to confirm content script is loaded
+  // Respond to ping to confirm content script is loaded, and report whether the
+  // PDF libraries are already available so the popup injects only what is missing.
   if (request.action === 'ping') {
-    sendResponse({ status: 'ready' });
+    sendResponse({ status: 'ready', pdfLibs: pdfLibsLoaded() });
     return true;
   }
 
   if (request.action === 'getContent') {
     try {
-      // Validate contentType before processing
-      if (!request.contentType || !VALID_CONTENT_TYPES.includes(request.contentType)) {
-        logError('Invalid content type:', request.contentType);
-        sendResponse(null);
-        return true;
-      }
-
       const content = extractContent(request.contentType);
       log('Extracted content:', content);
       sendResponse(content);
@@ -67,8 +75,8 @@ function extractContent(contentType) {
     case 'url-only':
       return getUrlOnly();
     default:
-      // Fallback to selection (should not reach here due to validation)
-      return getSelectedContent();
+      logError('Invalid content type:', contentType);
+      return null;
   }
 }
 
@@ -110,7 +118,7 @@ function getFullPageContent() {
   const clone = mainContent.cloneNode(true);
   
   // Remove script, style, and navigation elements
-  ['script', 'style', 'nav', 'header', 'footer', 'iframe'].forEach(tag => {
+  ['script', 'style', 'nav', 'header', 'footer', 'aside', 'iframe'].forEach(tag => {
     clone.querySelectorAll(tag).forEach(el => el.remove());
   });
   
@@ -154,8 +162,9 @@ function cleanHtml(html) {
   // Security: Sanitize all remaining elements
   const elements = div.querySelectorAll('*');
   elements.forEach(el => {
-    // Whitelist ONLY truly safe attributes
-    const safeAttrs = ['href', 'src', 'alt', 'title'];
+    // Whitelist ONLY truly safe attributes. colspan/rowspan/scope keep table structure,
+    // width/height keep image sizing; none of them can carry script.
+    const safeAttrs = ['href', 'src', 'alt', 'title', 'colspan', 'rowspan', 'scope', 'width', 'height'];
     Array.from(el.attributes).forEach(attr => {
       // Remove all event handlers (onclick, onload, etc.)
       if (attr.name.startsWith('on') || !safeAttrs.includes(attr.name)) {
@@ -246,72 +255,104 @@ const PDF_CONFIG = {
 
   // Layout settings
   MARGIN_MM: 10,                      // Page margins in millimeters
+  MAX_PAGES: 50,                      // Refuse pages that would need more PDF pages than this
+  MAX_CHUNK_PX: 15000,                // Tallest canvas rendered in one html2canvas call
 };
 
 /**
- * Generate PDF from current page using html2canvas and jsPDF
- * @returns {Promise<{pdfData: string}>} Promise resolving to PDF data as data URL
+ * Generate a PDF of the current page using html2canvas and jsPDF.
+ *
+ * The document is rendered in chunks of a few PDF pages each, kept under the browser's canvas
+ * size limit, and every page is cut out of its chunk. Rendering the whole document into one
+ * canvas (the original approach) produced blank pages on long documents.
+ *
+ * @returns {Promise<{success: boolean, pdfData?: string, error?: string}>}
  */
 async function printPageToPdf() {
   log('printPageToPdf: Starting PDF generation...');
 
   try {
-    // Libraries are now bundled, so they should be available immediately
-    if (typeof html2canvas === 'undefined') {
-      throw new Error('html2canvas library not available');
-    }
-    if (typeof jspdf === 'undefined') {
-      throw new Error('jsPDF library not available');
+    // The popup injects the libraries before sending printPage; verify they arrived
+    if (!pdfLibsLoaded()) {
+      throw new Error('PDF libraries not available');
     }
 
-    log('Libraries confirmed available');
-    log('Capturing page with html2canvas...');
-    const canvas = await html2canvas(document.body, {
-      scale: PDF_CONFIG.CANVAS_SCALE,
-      useCORS: PDF_CONFIG.USE_CORS,
-      logging: DEBUG,
-      windowWidth: document.documentElement.scrollWidth,
-      windowHeight: document.documentElement.scrollHeight,
-      allowTaint: PDF_CONFIG.ALLOW_TAINT,
-      backgroundColor: PDF_CONFIG.BACKGROUND_COLOR
-    });
-
-    log(`Canvas captured: ${canvas.width}x${canvas.height}px`);
-
-    const imgData = canvas.toDataURL('image/jpeg', PDF_CONFIG.JPEG_QUALITY);
-    log(`Image data created, size: ${Math.round(imgData.length / 1024)} KB`);
     const pdf = new jspdf.jsPDF({
       orientation: PDF_CONFIG.ORIENTATION,
       unit: PDF_CONFIG.UNIT,
       format: PDF_CONFIG.FORMAT
     });
 
-    const pdfWidth = pdf.internal.pageSize.getWidth();
-    const pdfHeight = pdf.internal.pageSize.getHeight();
-    const marginDouble = PDF_CONFIG.MARGIN_MM * 2;
-    const imgWidth = pdfWidth - marginDouble;
-    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+    const printableWidthMm = pdf.internal.pageSize.getWidth() - PDF_CONFIG.MARGIN_MM * 2;
+    const printableHeightMm = pdf.internal.pageSize.getHeight() - PDF_CONFIG.MARGIN_MM * 2;
 
-    let heightLeft = imgHeight;
-    let position = PDF_CONFIG.MARGIN_MM;
+    // Page geometry in CSS pixels. One PDF page covers a slice whose aspect ratio matches
+    // the printable area, so the image is scaled uniformly without distortion.
+    const docWidth = document.documentElement.scrollWidth;
+    const docHeight = document.documentElement.scrollHeight;
+    const sliceHeight = Math.floor(docWidth * printableHeightMm / printableWidthMm);
+    const pageCount = Math.max(1, Math.ceil(docHeight / sliceHeight));
 
-    pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, position, imgWidth, imgHeight);
-    heightLeft -= (pdfHeight - marginDouble);
+    log(`Document ${docWidth}x${docHeight}px, slice height ${sliceHeight}px, ${pageCount} pages`);
 
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight + PDF_CONFIG.MARGIN_MM;
-      pdf.addPage();
-      pdf.addImage(imgData, 'JPEG', PDF_CONFIG.MARGIN_MM, position, imgWidth, imgHeight);
-      heightLeft -= (pdfHeight - marginDouble);
+    if (pageCount > PDF_CONFIG.MAX_PAGES) {
+      throw new Error(`Page is too long to save as PDF (${pageCount} pages, limit is ${PDF_CONFIG.MAX_PAGES}). Try the Selection or Full Page option instead.`);
     }
 
-    const pdfData = pdf.output('dataurlstring');
-    log(`PDF generated successfully, size: ${Math.round(pdfData.length / 1024)} KB`);
+    // html2canvas clones and lays out the whole document on every call, so render as many
+    // pages per call as fit under the canvas size limit and cut the pages out of that chunk.
+    const pagesPerChunk = Math.max(1, Math.floor(PDF_CONFIG.MAX_CHUNK_PX / sliceHeight));
+    const pageCanvas = document.createElement('canvas');
+    const ctx = pageCanvas.getContext('2d');
 
-    return {
-      pdfData: pdfData,
-      success: true
-    };
+    for (let page = 0; page < pageCount; page += pagesPerChunk) {
+      const chunkPages = Math.min(pagesPerChunk, pageCount - page);
+      const y = page * sliceHeight;
+      const chunk = await html2canvas(document.body, {
+        scale: PDF_CONFIG.CANVAS_SCALE,
+        useCORS: PDF_CONFIG.USE_CORS,
+        logging: DEBUG,
+        allowTaint: PDF_CONFIG.ALLOW_TAINT,
+        backgroundColor: PDF_CONFIG.BACKGROUND_COLOR,
+        // Lay the clone out at the full document size so every chunk sees the same layout...
+        windowWidth: docWidth,
+        windowHeight: docHeight,
+        // ...and crop the rendering to this chunk, measured from the top of the document
+        x: 0,
+        y,
+        width: docWidth,
+        height: Math.min(chunkPages * sliceHeight, docHeight - y),
+        scrollX: 0,
+        scrollY: 0
+      });
+
+      for (let i = 0; i < chunkPages; i++) {
+        const sliceTop = i * sliceHeight;
+        const height = Math.min(sliceHeight, chunk.height - sliceTop);
+        if (height <= 0) break;
+        pageCanvas.width = chunk.width;
+        pageCanvas.height = height;
+        ctx.drawImage(chunk, 0, sliceTop, chunk.width, height, 0, 0, chunk.width, height);
+
+        // JPEG bytes go straight to jsPDF; a data URL would be base64-encoded and decoded again
+        const blob = await new Promise((resolve) => pageCanvas.toBlob(resolve, 'image/jpeg', PDF_CONFIG.JPEG_QUALITY));
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (page + i > 0) pdf.addPage();
+        pdf.addImage(bytes, 'JPEG', PDF_CONFIG.MARGIN_MM, PDF_CONFIG.MARGIN_MM, printableWidthMm, height * printableWidthMm / chunk.width);
+        log(`Rendered page ${page + i + 1}/${pageCount}`);
+      }
+
+      // Release the chunk bitmap before rendering the next one
+      chunk.width = 0;
+      chunk.height = 0;
+    }
+    pageCanvas.width = 0;
+    pageCanvas.height = 0;
+
+    const pdfData = pdf.output('dataurlstring');
+    log(`PDF generated successfully, ${pageCount} pages, size: ${Math.round(pdfData.length / 1024)} KB`);
+
+    return { success: true, pdfData };
 
   } catch (error) {
     console.error('PDF generation failed:', error);
@@ -321,3 +362,4 @@ async function printPageToPdf() {
     };
   }
 }
+})();
