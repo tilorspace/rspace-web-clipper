@@ -2,7 +2,7 @@
 
 Status: implemented on `refactor/review`. Every defect in section 1 has a regression check in
 the e2e scripts; all simplifications in section 2 are applied except (k), where the small
-worker-side sanitizer was kept.
+worker-side sanitizer was kept at first and then removed after CodeQL flagged it.
 
 Scope: everything between `main` and `docs/readme` (WP1 to WP10), plus the exploratory
 Playwright session in `scripts/e2e/explore.js`. Goal as asked: more robust, less complex, less code.

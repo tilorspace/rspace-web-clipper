@@ -264,7 +264,9 @@ async function clipContent(request) {
   const html = request.content && request.content.html;
   if (!html) throw new ClipError('Nothing to save');
   const target = await resolveTargetDocument(request);
-  return finishClip(target, request, clipBlock(request, 'Clipped from', `<div>${sanitizeClippedHtml(html)}</div>`));
+  // The HTML was sanitized in the page by cleanHtml() in content.js, which runs in the
+  // extension's isolated world; the worker has no DOM parser and does not re-filter it.
+  return finishClip(target, request, clipBlock(request, 'Clipped from', `<div>${html}</div>`));
 }
 
 async function clipPdf(request) {
@@ -327,25 +329,6 @@ function formatTimestamp(date) {
   const offsetMins = Math.abs(offsetMinutes) % 60;
   const timezone = `GMT${sign}${offsetHours}${offsetMins ? ':' + pad(offsetMins) : ''}`;
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${timezone}`;
-}
-
-/**
- * Second sanitization layer, applied in the worker where no DOM parser is available.
- * The primary sanitizer is cleanHtml() in content.js. This pass only drops script blocks and,
- * strictly inside tags, on* handlers and script-scheme URL attributes; text is never altered.
- */
-function sanitizeClippedHtml(html) {
-  if (!html) return '';
-  let cleaned = html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '');
-  cleaned = cleaned.replace(/<\/?[a-zA-Z][^>]*>/g, (tag) => {
-    let t = tag.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-    t = t.replace(/\s+(href|src|xlink:href|action|formaction)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, (match, name, value) => {
-      const v = value.replace(/^["']|["']$/g, '').replace(/[\s\u0000-\u001f]/g, '').toLowerCase();
-      return v.startsWith('javascript:') || v.startsWith('vbscript:') ? '' : match;
-    });
-    return t;
-  });
-  return cleaned;
 }
 
 function escapeHtml(text) {

@@ -10,8 +10,8 @@ Hardening release following a code and dependency review.
 - The `tabs` permission was dropped; `activeTab` already covers what the popup needs.
 - The API key is persisted (when "remember" is ticked) only after the server has accepted it.
 - Document and field ids from the popup are validated before being used in API URLs.
-- The worker side HTML sanitizer now only operates inside tags. Previously it also ran over
-  text and could cut words out of clipped prose.
+- The worker side regex "sanitizer" was removed: it mangled clipped prose and regex filtering of
+  HTML is unsound (CodeQL flagged it). Sanitizing happens once, in the page, on a parsed DOM.
 
 ### Fixed
 - Clipping as PDF after a text clip in the same tab logged a script redeclaration error.
