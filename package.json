@@ -9,7 +9,7 @@
     "url": "https://github.com/rspace-os/rspace-web-clipper.git"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "copy-libs": "node scripts/copy-libs.js",
@@ -27,6 +27,6 @@
     "jspdf": "4.2.1"
   },
   "devDependencies": {
-    "playwright": "^1.64.0"
+    "playwright": "^1.65.1"
   }
 }
