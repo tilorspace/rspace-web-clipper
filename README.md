@@ -87,7 +87,7 @@ repository root (`jspdf.umd.min.js` and `html2canvas.min.js`). Their versions ar
 `package.json` so that `npm audit` and Dependabot can track them.
 
 ```bash
-npm ci                 # install pinned dependencies (Node 20 or newer)
+npm ci                 # install pinned dependencies (Node 22 or newer)
 npm run check-libs     # verify the committed bundles match the installed package versions
 npm run copy-libs      # refresh the committed bundles after bumping a version in package.json
 npm run check-manifest # validate manifest.json, referenced files, permissions, and script syntax

@@ -9,7 +9,7 @@
     "url": "https://github.com/rspace-os/rspace-web-clipper.git"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "copy-libs": "node scripts/copy-libs.js",
